@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdio>
 #include <string>
+#include <ctime> // 時間取得用
 
 #pragma comment(lib, "d2d1.lib")
 
@@ -30,7 +31,7 @@ template <class T> void SafeRelease(T** ppT) {
 }
 
 // -----------------------------------------------------------------------------
-// MMU (MBC1/MBC2 Auto-Detection Fix)
+// MMU (MBC1 / MBC2 / MBC3 + RTC Support)
 // -----------------------------------------------------------------------------
 class MMU
 {
@@ -46,13 +47,26 @@ public:
     Byte interruptFlag;
     Byte interruptEnable;
 
-    int mbcType; // 0:None, 1:MBC1, 2:MBC2
+    // Cartridge Info
+    int mbcType; // 0:None, 1:MBC1, 2:MBC2, 3:MBC3
 
+    // MBC State
     bool ramEnable;
     int romBank;
-    int ramBank;
-    int bankingMode;
+    int ramBank;     // MBC1/3: RAM Bank or RTC Register Select
+    int bankingMode; // MBC1 only
 
+    // RTC State (MBC3)
+    bool rtcMapped;  // True if A000-BFFF maps to RTC
+    Byte rtcS;       // Seconds   (0x08)
+    Byte rtcM;       // Minutes   (0x09)
+    Byte rtcH;       // Hours     (0x0A)
+    Byte rtcDL;      // Lower Day (0x0B)
+    Byte rtcDH;      // Upper Day (0x0C)
+    Byte rtcLatch;   // Latch state (0 -> 1 write triggers latch)
+    time_t lastTime; // 簡易的な時間経過計算用
+
+    // Joypad
     Byte joypadButtons;
     Byte joypadDir;
 
@@ -64,7 +78,7 @@ public:
         hram.assign(0x80, 0);
         io.assign(0x80, 0);
         oam.assign(0xA0, 0);
-        sram.assign(0x8000, 0);
+        sram.assign(0x10000, 0); // 64KB (MBC3 Max)
 
         if (rom.size() < 0x8000) rom.resize(0x8000, 0);
 
@@ -77,6 +91,12 @@ public:
         ramBank = 0;
         bankingMode = 0;
 
+        // RTC Init
+        rtcMapped = false;
+        rtcS = rtcM = rtcH = rtcDL = rtcDH = 0;
+        rtcLatch = 0;
+        lastTime = time(NULL);
+
         joypadButtons = 0x0F;
         joypadDir = 0x0F;
     }
@@ -84,21 +104,19 @@ public:
     void LoadRomData(const std::vector<Byte>& data) {
         rom = data;
         if (rom.size() < 0x8000) rom.resize(0x8000, 0);
-
-        // SRAM初期化（MBC2の場合はゴミデータが必要なこともあるが、まずは0埋め）
         std::fill(sram.begin(), sram.end(), 0);
 
-        // --- MBC判定ロジック強化 ---
+        // --- MBC判定 ---
         Byte type = rom[0x0147];
 
-        // タイトル読み取り
         char title[17] = { 0 };
-        for (int i = 0; i < 16; i++) {
-            if (0x0134 + i < rom.size()) title[i] = rom[0x0134 + i];
-        }
+        for (int i = 0; i < 16; i++) { if (0x0134 + i < rom.size()) title[i] = rom[0x0134 + i]; }
 
         if (type == 0x05 || type == 0x06) {
             mbcType = 2; // MBC2
+        }
+        else if (type >= 0x0F && type <= 0x13) {
+            mbcType = 3; // MBC3 (Pokemon etc.)
         }
         else if (type >= 0x01 && type <= 0x03) {
             mbcType = 1; // MBC1
@@ -107,11 +125,11 @@ public:
             mbcType = 0; // ROM ONLY
         }
 
-        // Reset MBC State
         ramEnable = false;
         romBank = 1;
         ramBank = 0;
         bankingMode = 0;
+        rtcMapped = false;
     }
 
     void RequestInterrupt(int bit) { interruptFlag |= (1 << bit); }
@@ -120,6 +138,24 @@ public:
         Word srcBase = value << 8;
         for (int i = 0; i < 0xA0; i++) {
             oam[i] = Read(srcBase + i);
+        }
+    }
+
+    // 簡易的なRTC更新（フレーム毎に呼ばれる）
+    void UpdateRTC() {
+        if (mbcType != 3) return;
+
+        time_t now = time(NULL);
+        if (now > lastTime) {
+            // 1秒経過
+            lastTime = now;
+            // 本来はhaltフラグなどを見る必要があるが簡易実装
+            if (!(rtcDH & 0x40)) { // Halt flag check
+                rtcS++;
+                if (rtcS >= 60) { rtcS = 0; rtcM++; }
+                if (rtcM >= 60) { rtcM = 0; rtcH++; }
+                if (rtcH >= 24) { rtcH = 0; rtcDL++; if (rtcDL == 0) rtcDH |= 1; } // Day Overflow bit
+            }
         }
     }
 
@@ -132,36 +168,49 @@ public:
     }
 
     Byte Read(Word addr) {
-        if (addr < 0x4000) {
-            return rom[addr];
-        }
+        // ROM Bank 0
+        if (addr < 0x4000) return rom[addr];
+
+        // Switchable ROM Bank
         if (addr < 0x8000) {
             int bank = romBank;
             if (mbcType == 1 && bankingMode == 0) bank |= (ramBank << 5);
+
+            // Masking
             int maxBanks = (int)(rom.size() / 0x4000);
             if (maxBanks == 0) maxBanks = 1;
             bank %= maxBanks;
+
             return rom[(bank * 0x4000) + (addr - 0x4000)];
         }
         if (addr < 0xA000) return vram[addr - 0x8000];
 
-        // External RAM
+        // External RAM / RTC
         if (addr < 0xC000) {
             if (!ramEnable) return 0xFF;
 
-            if (mbcType == 2) {
-                // MBC2: 512x4 bits RAM (A000-A1FF)
-                // 上位4ビットは "Undefined" だが、実機では通常 1 (0xF0) が返る
-                // SAGA2はこれをチェックしている可能性がある
-                if (addr < 0xA200) {
-                    return 0xF0 | (sram[addr - 0xA000] & 0x0F);
+            if (mbcType == 3 && rtcMapped) {
+                // MBC3 RTC Read
+                switch (ramBank) {
+                case 0x08: return rtcS;
+                case 0x09: return rtcM;
+                case 0x0A: return rtcH;
+                case 0x0B: return rtcDL;
+                case 0x0C: return rtcDH;
+                default: return 0xFF;
                 }
+            }
+            else if (mbcType == 2) {
+                // MBC2 (4-bit RAM)
+                if (addr < 0xA200) return 0xF0 | (sram[addr - 0xA000] & 0x0F);
                 return 0xFF;
             }
-
-            // MBC1
-            int bank = (bankingMode == 1) ? ramBank : 0;
-            return sram[(bank * 0x2000) + (addr - 0xA000)];
+            else {
+                // MBC1 or MBC3 (SRAM Mode)
+                int bank = (mbcType == 3) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
+                // MBC3は最大4バンク(32KB)だが、Pokemon金銀は64KB使うこともある
+                return sram[(bank * 0x2000) + (addr - 0xA000)];
+            }
         }
 
         if (addr < 0xE000) return wram[addr - 0xC000];
@@ -178,6 +227,7 @@ public:
     }
 
     void Write(Word addr, Byte value) {
+        // --- ROM Area (MBC Control) ---
         if (addr < 0x8000) {
             if (mbcType == 1) {
                 if (addr < 0x2000) { ramEnable = ((value & 0x0F) == 0x0A); return; }
@@ -186,16 +236,32 @@ public:
                 if (addr < 0x8000) { bankingMode = value & 0x01; return; }
             }
             else if (mbcType == 2) {
-                // MBC2: Address bit 8 determines command
                 if (addr < 0x4000) {
-                    if (addr & 0x0100) {
-                        romBank = value & 0x0F;
-                        if (romBank == 0) romBank = 1;
+                    if (addr & 0x0100) { romBank = value & 0x0F; if (romBank == 0) romBank = 1; }
+                    else { ramEnable = ((value & 0x0F) == 0x0A); }
+                }
+            }
+            else if (mbcType == 3) { // MBC3 Implementation
+                if (addr < 0x2000) {
+                    ramEnable = ((value & 0x0F) == 0x0A);
+                }
+                else if (addr < 0x4000) {
+                    romBank = value & 0x7F; // 7bit (128 banks)
+                    if (romBank == 0) romBank = 1;
+                }
+                else if (addr < 0x6000) {
+                    // RAM Bank Select (0-3) or RTC Register Select (08-0C)
+                    ramBank = value;
+                    rtcMapped = (value >= 0x08 && value <= 0x0C);
+                }
+                else if (addr < 0x8000) {
+                    // Latch Clock Data (Write 0 then 1 to latch)
+                    if (rtcLatch == 0 && value == 1) {
+                        // 本来はここで内部カウンタをレジスタにコピーする処理
+                        // 今回はUpdateRTCで随時更新しているので何もしないか、現在時刻を再取得
+                        lastTime = time(NULL);
                     }
-                    else {
-                        ramEnable = ((value & 0x0F) == 0x0A);
-                    }
-                    return;
+                    rtcLatch = value;
                 }
             }
             return;
@@ -203,18 +269,28 @@ public:
 
         if (addr < 0xA000) { vram[addr - 0x8000] = value; return; }
 
+        // --- External RAM / RTC Write ---
         if (addr < 0xC000) {
-            if (ramEnable) {
-                if (mbcType == 2) {
-                    if (addr < 0xA200) {
-                        // 下位4ビットのみ保存
-                        sram[addr - 0xA000] = value & 0x0F;
-                    }
+            if (!ramEnable) return;
+
+            if (mbcType == 3 && rtcMapped) {
+                // RTC Write
+                switch (ramBank) {
+                case 0x08: rtcS = value; break;
+                case 0x09: rtcM = value; break;
+                case 0x0A: rtcH = value; break;
+                case 0x0B: rtcDL = value; break;
+                case 0x0C: rtcDH = value; break;
                 }
-                else {
-                    int bank = (bankingMode == 1) ? ramBank : 0;
-                    sram[(bank * 0x2000) + (addr - 0xA000)] = value;
-                }
+            }
+            else if (mbcType == 2) {
+                if (addr < 0xA200) sram[addr - 0xA000] = value & 0x0F;
+            }
+            else {
+                // MBC1 or MBC3 SRAM
+                int bank = (mbcType == 3) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
+                int idx = (bank * 0x2000) + (addr - 0xA000);
+                if (idx < sram.size()) sram[idx] = value;
             }
             return;
         }
@@ -254,6 +330,7 @@ public:
     std::string GetMBCName() {
         if (mbcType == 1) return "MBC1";
         if (mbcType == 2) return "MBC2";
+        if (mbcType == 3) return "MBC3";
         return "ROM ONLY";
     }
 };
@@ -481,13 +558,20 @@ public:
         ppu.Reset();
         isRomLoaded = loaded;
         divCounter = 0;
-        if (!isRomLoaded) { SetupTestRender(); }
-        else { mmu.io[0x40] = 0x91; mmu.io[0x47] = 0xE4; }
+
+        if (!isRomLoaded) {
+            SetupTestRender();
+        }
+        else {
+            mmu.io[0x40] = 0x91;
+            mmu.io[0x47] = 0xE4;
+        }
     }
 
     void SetupTestRender() {
         if (mmu.rom.size() < 0x200) mmu.rom.resize(0x200, 0);
-        mmu.io[0x40] = 0x91; mmu.io[0x47] = 0xE4;
+        mmu.io[0x40] = 0x91;
+        mmu.io[0x47] = 0xE4;
         for (int i = 0; i < 0x1800; i++) mmu.vram[i] = (i % 2 == 0) ? 0xFF : 0x00;
         mmu.rom[0x0100] = 0x00; mmu.rom[0x0101] = 0xC3; mmu.rom[0x0102] = 0x00; mmu.rom[0x0103] = 0x01;
     }
@@ -496,9 +580,11 @@ public:
         FILE* fp = NULL;
         _wfopen_s(&fp, path.c_str(), L"rb");
         if (!fp) return false;
+
         fseek(fp, 0, SEEK_END);
         long size = ftell(fp);
         fseek(fp, 0, SEEK_SET);
+
         std::vector<Byte> buffer(size);
         if (fread(buffer.data(), 1, size, fp) == size) {
             fclose(fp);
@@ -510,7 +596,9 @@ public:
         return false;
     }
 
-    std::string GetTitle() { return mmu.GetTitle() + " (" + mmu.GetMBCName() + ")"; }
+    std::string GetTitle() {
+        return mmu.GetTitle() + " (" + mmu.GetMBCName() + ")";
+    }
 
     void StepFrame() {
         const int CYCLES_PER_FRAME = 70224;
@@ -518,8 +606,14 @@ public:
         while (cyclesThisFrame < CYCLES_PER_FRAME) {
             int cycles = cpu.Step();
             ppu.Step(cycles);
+            mmu.UpdateRTC(); // RTC更新
+
             divCounter += cycles;
-            if (divCounter >= 256) { mmu.io[0x04]++; divCounter -= 256; }
+            if (divCounter >= 256) {
+                mmu.io[0x04]++;
+                divCounter -= 256;
+            }
+
             cyclesThisFrame += cycles;
         }
     }
@@ -564,7 +658,7 @@ public:
         AppendMenu(hSubMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenu(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSubMenu, L"File");
 
-        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator (SAGA2 Fixed)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, GB_WIDTH * 4, GB_HEIGHT * 4, NULL, hMenu, hInstance, this);
+        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator (MBC1/2/3 Support)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, GB_WIDTH * 4, GB_HEIGHT * 4, NULL, hMenu, hInstance, this);
         if (m_hwnd) { ShowWindow(m_hwnd, nCmdShow); UpdateWindow(m_hwnd); return S_OK; }
         return E_FAIL;
     }
@@ -596,6 +690,9 @@ private:
                 std::wstring wTitle(titleStr.begin(), titleStr.end());
                 std::wstring winTitle = L"GameBoy Emulator - " + wTitle;
                 SetWindowText(m_hwnd, winTitle.c_str());
+            }
+            else {
+                MessageBox(m_hwnd, L"Failed to load ROM file.", L"Error", MB_OK | MB_ICONERROR);
             }
         }
     }

@@ -12,7 +12,7 @@
 #include <cstring>
 #include <cstdio>
 #include <string>
-#include <ctime> // 時間取得用
+#include <ctime>
 
 #pragma comment(lib, "d2d1.lib")
 
@@ -31,7 +31,7 @@ template <class T> void SafeRelease(T** ppT) {
 }
 
 // -----------------------------------------------------------------------------
-// MMU (MBC1 / MBC2 / MBC3 + RTC Support)
+// MMU
 // -----------------------------------------------------------------------------
 class MMU
 {
@@ -47,26 +47,17 @@ public:
     Byte interruptFlag;
     Byte interruptEnable;
 
-    // Cartridge Info
-    int mbcType; // 0:None, 1:MBC1, 2:MBC2, 3:MBC3
-
-    // MBC State
+    int mbcType;
     bool ramEnable;
     int romBank;
-    int ramBank;     // MBC1/3: RAM Bank or RTC Register Select
-    int bankingMode; // MBC1 only
+    int ramBank;
+    int bankingMode;
 
-    // RTC State (MBC3)
-    bool rtcMapped;  // True if A000-BFFF maps to RTC
-    Byte rtcS;       // Seconds   (0x08)
-    Byte rtcM;       // Minutes   (0x09)
-    Byte rtcH;       // Hours     (0x0A)
-    Byte rtcDL;      // Lower Day (0x0B)
-    Byte rtcDH;      // Upper Day (0x0C)
-    Byte rtcLatch;   // Latch state (0 -> 1 write triggers latch)
-    time_t lastTime; // 簡易的な時間経過計算用
+    // RTC (MBC3)
+    bool rtcMapped;
+    Byte rtcS, rtcM, rtcH, rtcDL, rtcDH, rtcLatch;
+    time_t lastTime;
 
-    // Joypad
     Byte joypadButtons;
     Byte joypadDir;
 
@@ -78,7 +69,7 @@ public:
         hram.assign(0x80, 0);
         io.assign(0x80, 0);
         oam.assign(0xA0, 0);
-        sram.assign(0x10000, 0); // 64KB (MBC3 Max)
+        sram.assign(0x10000, 0);
 
         if (rom.size() < 0x8000) rom.resize(0x8000, 0);
 
@@ -91,10 +82,8 @@ public:
         ramBank = 0;
         bankingMode = 0;
 
-        // RTC Init
         rtcMapped = false;
-        rtcS = rtcM = rtcH = rtcDL = rtcDH = 0;
-        rtcLatch = 0;
+        rtcS = rtcM = rtcH = rtcDL = rtcDH = rtcLatch = 0;
         lastTime = time(NULL);
 
         joypadButtons = 0x0F;
@@ -106,24 +95,11 @@ public:
         if (rom.size() < 0x8000) rom.resize(0x8000, 0);
         std::fill(sram.begin(), sram.end(), 0);
 
-        // --- MBC判定 ---
         Byte type = rom[0x0147];
-
-        char title[17] = { 0 };
-        for (int i = 0; i < 16; i++) { if (0x0134 + i < rom.size()) title[i] = rom[0x0134 + i]; }
-
-        if (type == 0x05 || type == 0x06) {
-            mbcType = 2; // MBC2
-        }
-        else if (type >= 0x0F && type <= 0x13) {
-            mbcType = 3; // MBC3 (Pokemon etc.)
-        }
-        else if (type >= 0x01 && type <= 0x03) {
-            mbcType = 1; // MBC1
-        }
-        else {
-            mbcType = 0; // ROM ONLY
-        }
+        if (type == 0x05 || type == 0x06) mbcType = 2; // MBC2
+        else if (type >= 0x0F && type <= 0x13) mbcType = 3; // MBC3
+        else if (type >= 0x01 && type <= 0x03) mbcType = 1; // MBC1
+        else mbcType = 0;
 
         ramEnable = false;
         romBank = 1;
@@ -141,20 +117,16 @@ public:
         }
     }
 
-    // 簡易的なRTC更新（フレーム毎に呼ばれる）
     void UpdateRTC() {
         if (mbcType != 3) return;
-
         time_t now = time(NULL);
         if (now > lastTime) {
-            // 1秒経過
             lastTime = now;
-            // 本来はhaltフラグなどを見る必要があるが簡易実装
-            if (!(rtcDH & 0x40)) { // Halt flag check
+            if (!(rtcDH & 0x40)) {
                 rtcS++;
                 if (rtcS >= 60) { rtcS = 0; rtcM++; }
                 if (rtcM >= 60) { rtcM = 0; rtcH++; }
-                if (rtcH >= 24) { rtcH = 0; rtcDL++; if (rtcDL == 0) rtcDH |= 1; } // Day Overflow bit
+                if (rtcH >= 24) { rtcH = 0; rtcDL++; if (rtcDL == 0) rtcDH |= 1; }
             }
         }
     }
@@ -168,56 +140,37 @@ public:
     }
 
     Byte Read(Word addr) {
-        // ROM Bank 0
         if (addr < 0x4000) return rom[addr];
-
-        // Switchable ROM Bank
         if (addr < 0x8000) {
             int bank = romBank;
             if (mbcType == 1 && bankingMode == 0) bank |= (ramBank << 5);
-
-            // Masking
             int maxBanks = (int)(rom.size() / 0x4000);
             if (maxBanks == 0) maxBanks = 1;
             bank %= maxBanks;
-
             return rom[(bank * 0x4000) + (addr - 0x4000)];
         }
         if (addr < 0xA000) return vram[addr - 0x8000];
-
-        // External RAM / RTC
         if (addr < 0xC000) {
             if (!ramEnable) return 0xFF;
-
             if (mbcType == 3 && rtcMapped) {
-                // MBC3 RTC Read
                 switch (ramBank) {
-                case 0x08: return rtcS;
-                case 0x09: return rtcM;
-                case 0x0A: return rtcH;
-                case 0x0B: return rtcDL;
-                case 0x0C: return rtcDH;
-                default: return 0xFF;
+                case 0x08: return rtcS; case 0x09: return rtcM; case 0x0A: return rtcH;
+                case 0x0B: return rtcDL; case 0x0C: return rtcDH; default: return 0xFF;
                 }
             }
             else if (mbcType == 2) {
-                // MBC2 (4-bit RAM)
                 if (addr < 0xA200) return 0xF0 | (sram[addr - 0xA000] & 0x0F);
                 return 0xFF;
             }
             else {
-                // MBC1 or MBC3 (SRAM Mode)
                 int bank = (mbcType == 3) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
-                // MBC3は最大4バンク(32KB)だが、Pokemon金銀は64KB使うこともある
                 return sram[(bank * 0x2000) + (addr - 0xA000)];
             }
         }
-
         if (addr < 0xE000) return wram[addr - 0xC000];
         if (addr < 0xFE00) return wram[addr - 0xE000];
         if (addr < 0xFEA0) return oam[addr - 0xFE00];
         if (addr < 0xFF00) return 0xFF;
-
         if (addr == 0xFF00) return GetJoypadState();
         if (addr == 0xFF0F) return interruptFlag;
         if (addr < 0xFF80) return io[addr - 0xFF00];
@@ -227,83 +180,47 @@ public:
     }
 
     void Write(Word addr, Byte value) {
-        // --- ROM Area (MBC Control) ---
         if (addr < 0x8000) {
             if (mbcType == 1) {
-                if (addr < 0x2000) { ramEnable = ((value & 0x0F) == 0x0A); return; }
-                if (addr < 0x4000) { romBank = value & 0x1F; if (romBank == 0) romBank = 1; return; }
-                if (addr < 0x6000) { ramBank = value & 0x03; return; }
-                if (addr < 0x8000) { bankingMode = value & 0x01; return; }
+                if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A);
+                else if (addr < 0x4000) { romBank = value & 0x1F; if (romBank == 0) romBank = 1; }
+                else if (addr < 0x6000) ramBank = value & 0x03;
+                else if (addr < 0x8000) bankingMode = value & 0x01;
             }
             else if (mbcType == 2) {
                 if (addr < 0x4000) {
                     if (addr & 0x0100) { romBank = value & 0x0F; if (romBank == 0) romBank = 1; }
-                    else { ramEnable = ((value & 0x0F) == 0x0A); }
+                    else ramEnable = ((value & 0x0F) == 0x0A);
                 }
             }
-            else if (mbcType == 3) { // MBC3 Implementation
-                if (addr < 0x2000) {
-                    ramEnable = ((value & 0x0F) == 0x0A);
-                }
-                else if (addr < 0x4000) {
-                    romBank = value & 0x7F; // 7bit (128 banks)
-                    if (romBank == 0) romBank = 1;
-                }
-                else if (addr < 0x6000) {
-                    // RAM Bank Select (0-3) or RTC Register Select (08-0C)
-                    ramBank = value;
-                    rtcMapped = (value >= 0x08 && value <= 0x0C);
-                }
-                else if (addr < 0x8000) {
-                    // Latch Clock Data (Write 0 then 1 to latch)
-                    if (rtcLatch == 0 && value == 1) {
-                        // 本来はここで内部カウンタをレジスタにコピーする処理
-                        // 今回はUpdateRTCで随時更新しているので何もしないか、現在時刻を再取得
-                        lastTime = time(NULL);
-                    }
-                    rtcLatch = value;
-                }
+            else if (mbcType == 3) {
+                if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A);
+                else if (addr < 0x4000) { romBank = value & 0x7F; if (romBank == 0) romBank = 1; }
+                else if (addr < 0x6000) { ramBank = value; rtcMapped = (value >= 0x08 && value <= 0x0C); }
+                else if (addr < 0x8000) rtcLatch = value;
             }
             return;
         }
-
         if (addr < 0xA000) { vram[addr - 0x8000] = value; return; }
-
-        // --- External RAM / RTC Write ---
         if (addr < 0xC000) {
-            if (!ramEnable) return;
-
-            if (mbcType == 3 && rtcMapped) {
-                // RTC Write
-                switch (ramBank) {
-                case 0x08: rtcS = value; break;
-                case 0x09: rtcM = value; break;
-                case 0x0A: rtcH = value; break;
-                case 0x0B: rtcDL = value; break;
-                case 0x0C: rtcDH = value; break;
+            if (ramEnable) {
+                if (mbcType == 3 && rtcMapped) { /* RTC Write */ }
+                else if (mbcType == 2) { if (addr < 0xA200) sram[addr - 0xA000] = value & 0x0F; }
+                else {
+                    int bank = (mbcType == 3) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
+                    int idx = (bank * 0x2000) + (addr - 0xA000);
+                    if (idx < sram.size()) sram[idx] = value;
                 }
-            }
-            else if (mbcType == 2) {
-                if (addr < 0xA200) sram[addr - 0xA000] = value & 0x0F;
-            }
-            else {
-                // MBC1 or MBC3 SRAM
-                int bank = (mbcType == 3) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
-                int idx = (bank * 0x2000) + (addr - 0xA000);
-                if (idx < sram.size()) sram[idx] = value;
             }
             return;
         }
-
         if (addr < 0xE000) { wram[addr - 0xC000] = value; return; }
         if (addr < 0xFE00) { wram[addr - 0xE000] = value; return; }
         if (addr < 0xFEA0) { oam[addr - 0xFE00] = value; return; }
         if (addr < 0xFF00) return;
-
         if (addr == 0xFF00) { io[0x00] = value; return; }
         if (addr == 0xFF0F) { interruptFlag = value; return; }
         if (addr == 0xFF46) { DoDMA(value); return; }
-
         if (addr < 0xFF80) { io[addr - 0xFF00] = value; return; }
         if (addr < 0xFFFF) { hram[addr - 0xFF80] = value; return; }
         if (addr == 0xFFFF) { interruptEnable = value; return; }
@@ -312,31 +229,21 @@ public:
     void SetKey(int keyId, bool pressed) {
         Byte* target = (keyId < 4) ? &joypadDir : &joypadButtons;
         int bit = keyId % 4;
-        if (pressed) *target &= ~(1 << bit);
-        else         *target |= (1 << bit);
+        if (pressed) *target &= ~(1 << bit); else *target |= (1 << bit);
     }
-
     std::string GetTitle() {
         if (rom.size() < 0x143) return "";
-        char buf[17] = { 0 };
-        for (int i = 0; i < 16; i++) {
-            char c = rom[0x0134 + i];
-            if (c == 0) break;
-            buf[i] = c;
-        }
+        char buf[17] = { 0 }; for (int i = 0; i < 16; i++) { char c = rom[0x0134 + i]; if (c == 0) break; buf[i] = c; }
         return std::string(buf);
     }
-
     std::string GetMBCName() {
-        if (mbcType == 1) return "MBC1";
-        if (mbcType == 2) return "MBC2";
-        if (mbcType == 3) return "MBC3";
+        if (mbcType == 1) return "MBC1"; if (mbcType == 2) return "MBC2"; if (mbcType == 3) return "MBC3";
         return "ROM ONLY";
     }
 };
 
 // -----------------------------------------------------------------------------
-// PPU (No Change)
+// PPU (Window Layer Supported)
 // -----------------------------------------------------------------------------
 class PPU
 {
@@ -344,41 +251,93 @@ private:
     MMU* mmu;
     uint32_t* screenBuffer;
     int cycleCounter;
+    int mode;
     const uint32_t PALETTE[4] = { 0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820 };
 
 public:
-    PPU(MMU* m) : mmu(m), screenBuffer(nullptr), cycleCounter(0) {}
-    void Reset() { cycleCounter = 0; }
+    PPU(MMU* m) : mmu(m), screenBuffer(nullptr), cycleCounter(0), mode(2) {}
+    void Reset() { cycleCounter = 0; mode = 2; }
     void SetScreenBuffer(uint32_t* buffer) { screenBuffer = buffer; }
     Byte GetLY() { return mmu->io[0x44]; }
     void SetLY(Byte v) { mmu->io[0x44] = v; }
     Byte GetLCDC() { return mmu->io[0x40]; }
+    Byte GetSTAT() { return mmu->io[0x41]; }
+    void SetSTAT(Byte v) { mmu->io[0x41] = v; }
+    Byte GetLYC() { return mmu->io[0x45]; }
 
     void Step(int cycles) {
-        if (!(GetLCDC() & 0x80)) { SetLY(0); cycleCounter = 0; return; }
-        cycleCounter += cycles;
-        if (cycleCounter >= 456) {
-            cycleCounter -= 456;
-            Byte ly = GetLY();
-            if (ly < 144) RenderScanline(ly);
-            ly++;
-            if (ly == 144) mmu->RequestInterrupt(0);
-            if (ly > 153) ly = 0;
-            SetLY(ly);
+        Byte lcdc = GetLCDC();
+        if (!(lcdc & 0x80)) {
+            SetLY(0); cycleCounter = 0; mode = 0;
+            Byte stat = GetSTAT() & 0xFC; SetSTAT(stat);
+            return;
         }
+
+        cycleCounter += cycles;
+        Byte ly = GetLY();
+        Byte stat = GetSTAT();
+        int reqInt = 0;
+
+        if (mode == 2) {
+            if (cycleCounter >= 80) { cycleCounter -= 80; mode = 3; }
+        }
+        else if (mode == 3) {
+            if (cycleCounter >= 172) {
+                cycleCounter -= 172; mode = 0;
+                RenderScanline(ly);
+                if (stat & 0x08) reqInt = 1;
+            }
+        }
+        else if (mode == 0) {
+            if (cycleCounter >= 204) {
+                cycleCounter -= 204;
+                ly++; SetLY(ly);
+                if (ly == 144) {
+                    mode = 1; mmu->RequestInterrupt(0);
+                    if (stat & 0x10) reqInt = 1;
+                }
+                else {
+                    mode = 2;
+                    if (stat & 0x20) reqInt = 1;
+                }
+                if (ly == GetLYC()) { stat |= 0x04; if (stat & 0x40) reqInt = 1; }
+                else { stat &= ~0x04; }
+            }
+        }
+        else if (mode == 1) {
+            if (cycleCounter >= 456) {
+                cycleCounter -= 456; ly++;
+                if (ly > 153) { mode = 2; ly = 0; if (stat & 0x20) reqInt = 1; }
+                SetLY(ly);
+                if (ly == GetLYC()) { stat |= 0x04; if (stat & 0x40) reqInt = 1; }
+                else { stat &= ~0x04; }
+            }
+        }
+        stat = (stat & 0xFC) | (mode & 0x03);
+        SetSTAT(stat);
+        if (reqInt) mmu->RequestInterrupt(1);
     }
+
     void RenderScanline(int line) {
         if (!screenBuffer) return;
         Byte lcdc = GetLCDC();
-        if (!(lcdc & 0x01)) return;
-        Byte bgp = mmu->io[0x47];
-        uint32_t palette[4];
-        for (int i = 0; i < 4; i++) palette[i] = PALETTE[(bgp >> (i * 2)) & 3];
+        if (!(lcdc & 0x01)) return; // BG Disable
+
         Byte scy = mmu->io[0x42];
         Byte scx = mmu->io[0x43];
+        Byte bgp = mmu->io[0x47];
+        // ウィンドウ関連レジスタ
+        Byte wy = mmu->io[0x4A];
+        Byte wx = mmu->io[0x4B] - 7;
+
+        uint32_t palette[4];
+        for (int i = 0; i < 4; i++) palette[i] = PALETTE[(bgp >> (i * 2)) & 3];
+
+        // --- BG Rendering ---
         Word mapBase = (lcdc & 0x08) ? 0x9C00 : 0x9800;
         Word tileBase = (lcdc & 0x10) ? 0x8000 : 0x9000;
         bool unsignedTile = (lcdc & 0x10);
+
         Byte mapY = line + scy;
         for (int x = 0; x < 160; ++x) {
             Byte mapX = x + scx;
@@ -391,6 +350,73 @@ public:
             int bit = 7 - (mapX % 8);
             int colorId = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
             screenBuffer[line * 160 + x] = palette[colorId];
+        }
+
+        // --- Window Rendering (New!) ---
+        if ((lcdc & 0x20) && line >= wy) { // Window Enable & Line Check
+            Word winMapBase = (lcdc & 0x40) ? 0x9C00 : 0x9800;
+            for (int x = 0; x < 160; ++x) {
+                if (x >= wx) {
+                    int winX = x - wx;
+                    int winY = line - wy;
+
+                    Word tileIdxAddr = winMapBase + (winY / 8) * 32 + (winX / 8);
+                    Byte tileIdx = mmu->Read(tileIdxAddr);
+                    Word tileAddr = unsignedTile ? tileBase + (tileIdx * 16) : tileBase + (static_cast<int8_t>(tileIdx) * 16);
+                    Byte row = winY % 8;
+                    Byte b1 = mmu->Read(tileAddr + row * 2);
+                    Byte b2 = mmu->Read(tileAddr + row * 2 + 1);
+                    int bit = 7 - (winX % 8);
+                    int colorId = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
+                    screenBuffer[line * 160 + x] = palette[colorId];
+                }
+            }
+        }
+
+        // --- Sprite Rendering ---
+        if (!(lcdc & 0x02)) return; // OBJ Disable
+
+        Byte obp0 = mmu->io[0x48];
+        Byte obp1 = mmu->io[0x49];
+        uint32_t palObj0[4], palObj1[4];
+        for (int i = 0; i < 4; i++) {
+            palObj0[i] = PALETTE[(obp0 >> (i * 2)) & 3];
+            palObj1[i] = PALETTE[(obp1 >> (i * 2)) & 3];
+        }
+
+        int height = (lcdc & 0x04) ? 16 : 8;
+
+        for (int i = 0; i < 40; i++) {
+            Byte y = mmu->oam[i * 4];
+            Byte x = mmu->oam[i * 4 + 1];
+            Byte tile = mmu->oam[i * 4 + 2];
+            Byte attr = mmu->oam[i * 4 + 3];
+
+            int spriteY = line - (y - 16);
+            if (spriteY < 0 || spriteY >= height) continue;
+
+            if (attr & 0x40) spriteY = height - 1 - spriteY;
+            if (height == 16) tile &= 0xFE;
+
+            Word tileAddr = 0x8000 + (tile * 16) + (spriteY * 2);
+            Byte b1 = mmu->Read(tileAddr);
+            Byte b2 = mmu->Read(tileAddr + 1);
+
+            uint32_t* pal = (attr & 0x10) ? palObj1 : palObj0;
+
+            for (int px = 0; px < 8; px++) {
+                int screenX = (x - 8) + px;
+                if (screenX < 0 || screenX >= 160) continue;
+
+                int bit = (attr & 0x20) ? px : (7 - px);
+                int colorId = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
+
+                if (colorId == 0) continue;
+                // Priority Check: BGOverOBJ (Bit7) -> if BG color 1-3, don't draw sprite
+                if ((attr & 0x80) && screenBuffer[line * 160 + screenX] != PALETTE[0]) continue;
+
+                screenBuffer[line * 160 + screenX] = pal[colorId];
+            }
         }
     }
 };
@@ -606,7 +632,7 @@ public:
         while (cyclesThisFrame < CYCLES_PER_FRAME) {
             int cycles = cpu.Step();
             ppu.Step(cycles);
-            mmu.UpdateRTC(); // RTC更新
+            mmu.UpdateRTC();
 
             divCounter += cycles;
             if (divCounter >= 256) {
@@ -658,7 +684,7 @@ public:
         AppendMenu(hSubMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenu(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSubMenu, L"File");
 
-        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator (MBC1/2/3 Support)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, GB_WIDTH * 4, GB_HEIGHT * 4, NULL, hMenu, hInstance, this);
+        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator (Window Supported)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, GB_WIDTH * 4, GB_HEIGHT * 4, NULL, hMenu, hInstance, this);
         if (m_hwnd) { ShowWindow(m_hwnd, nCmdShow); UpdateWindow(m_hwnd); return S_OK; }
         return E_FAIL;
     }

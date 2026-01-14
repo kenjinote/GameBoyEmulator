@@ -53,6 +53,10 @@ public:
     int ramBank;
     int bankingMode;
 
+    // Timer
+    int divCounter; // DIV用内部カウンタ
+    int tacCounter; // TIMA用内部カウンタ
+
     // RTC (MBC3)
     bool rtcMapped;
     Byte rtcS, rtcM, rtcH, rtcDL, rtcDH, rtcLatch;
@@ -81,6 +85,9 @@ public:
         romBank = 1;
         ramBank = 0;
         bankingMode = 0;
+
+        divCounter = 0;
+        tacCounter = 0;
 
         rtcMapped = false;
         rtcS = rtcM = rtcH = rtcDL = rtcDH = rtcLatch = 0;
@@ -131,6 +138,48 @@ public:
         }
     }
 
+    // タイマー更新ロジック (追加)
+    void UpdateTimers(int cycles) {
+        // 1. DIV (Divider Register) - 16384Hz (256 cycles)
+        divCounter += cycles;
+        while (divCounter >= 256) {
+            io[0x04]++;
+            divCounter -= 256;
+        }
+
+        // 2. TIMA (Timer Counter) - TAC (0xFF07) Control
+        Byte tac = io[0x07];
+        if (tac & 0x04) { // Timer Enable
+            tacCounter += cycles;
+
+            // Frequency Settings
+            // 00: 4096 Hz (1024 cycles)
+            // 01: 262144 Hz (16 cycles)
+            // 10: 65536 Hz (64 cycles)
+            // 11: 16384 Hz (256 cycles)
+            int threshold = 1024;
+            switch (tac & 0x03) {
+            case 0: threshold = 1024; break;
+            case 1: threshold = 16; break;
+            case 2: threshold = 64; break;
+            case 3: threshold = 256; break;
+            }
+
+            while (tacCounter >= threshold) {
+                tacCounter -= threshold;
+                Byte tima = io[0x05];
+                if (tima == 0xFF) {
+                    // Overflow
+                    io[0x05] = io[0x06]; // Reload TMA
+                    RequestInterrupt(2); // Timer Interrupt
+                }
+                else {
+                    io[0x05]++;
+                }
+            }
+        }
+    }
+
     Byte GetJoypadState() {
         Byte select = io[0x00];
         Byte result = 0xCF | select;
@@ -159,7 +208,7 @@ public:
                 }
             }
             else if (mbcType == 2) {
-                if (addr < 0xA200) return 0xF0 | (sram[addr - 0xA000] & 0x0F);
+                if (addr < 0xA200) return (sram[addr - 0xA000] & 0x0F);
                 return 0xFF;
             }
             else {
@@ -219,6 +268,7 @@ public:
         if (addr < 0xFEA0) { oam[addr - 0xFE00] = value; return; }
         if (addr < 0xFF00) return;
         if (addr == 0xFF00) { io[0x00] = value; return; }
+        if (addr == 0xFF04) { io[0x04] = 0; divCounter = 0; return; } // Reset DIV on write
         if (addr == 0xFF0F) { interruptFlag = value; return; }
         if (addr == 0xFF46) { DoDMA(value); return; }
         if (addr < 0xFF80) { io[addr - 0xFF00] = value; return; }
@@ -328,7 +378,8 @@ public:
         Byte bgp = mmu->io[0x47];
         // ウィンドウ関連レジスタ
         Byte wy = mmu->io[0x4A];
-        Byte wx = mmu->io[0x4B] - 7;
+        // 修正点: wxの計算をint型で行い、負の値を許容する (7を引くと負になる可能性があるため)
+        int wx = (int)mmu->io[0x4B] - 7;
 
         uint32_t palette[4];
         for (int i = 0; i < 4; i++) palette[i] = PALETTE[(bgp >> (i * 2)) & 3];
@@ -352,10 +403,11 @@ public:
             screenBuffer[line * 160 + x] = palette[colorId];
         }
 
-        // --- Window Rendering (New!) ---
+        // --- Window Rendering ---
         if ((lcdc & 0x20) && line >= wy) { // Window Enable & Line Check
             Word winMapBase = (lcdc & 0x40) ? 0x9C00 : 0x9800;
             for (int x = 0; x < 160; ++x) {
+                // int型同士で比較するので、wxが負の値でも正しく動作する
                 if (x >= wx) {
                     int winX = x - wx;
                     int winY = line - wy;
@@ -570,9 +622,9 @@ public:
     PPU ppu;
     std::vector<uint32_t> displayBuffer;
     bool isRomLoaded;
-    int divCounter;
+    // divCounterはMMUに移動したため削除
 
-    GameBoyCore() : cpu(&mmu), ppu(&mmu), isRomLoaded(false), divCounter(0) {
+    GameBoyCore() : cpu(&mmu), ppu(&mmu), isRomLoaded(false) {
         displayBuffer.resize(GB_WIDTH * GB_HEIGHT);
         ppu.SetScreenBuffer(displayBuffer.data());
         Reset(false);
@@ -583,7 +635,6 @@ public:
         cpu.Reset();
         ppu.Reset();
         isRomLoaded = loaded;
-        divCounter = 0;
 
         if (!isRomLoaded) {
             SetupTestRender();
@@ -633,12 +684,8 @@ public:
             int cycles = cpu.Step();
             ppu.Step(cycles);
             mmu.UpdateRTC();
-
-            divCounter += cycles;
-            if (divCounter >= 256) {
-                mmu.io[0x04]++;
-                divCounter -= 256;
-            }
+            // タイマー更新 (修正点)
+            mmu.UpdateTimers(cycles);
 
             cyclesThisFrame += cycles;
         }
@@ -749,6 +796,26 @@ private:
                 m_pRenderTarget->DrawBitmap(m_pBitmap, D2D1::RectF(0, 0, rtSize.width, rtSize.height), 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL);
             }
             if (m_pRenderTarget->EndDraw() == D2DERR_RECREATE_TARGET) { SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); }
+
+            // --- 診断用コード (追加) ---
+        // 動作状況をタイトルバーに表示（60フレームに1回更新）
+            static int frameCount = 0;
+            frameCount++;
+            if (frameCount % 60 == 0) {
+                wchar_t debugBuf[256];
+                // PCの位置にある命令コード (Opcode) を取得
+                Byte opcode = m_gbCore.mmu.Read(m_gbCore.cpu.reg.pc);
+
+                swprintf_s(debugBuf, L"PC:%04X OP:%02X LY:%02d IME:%d IF:%02X TAC:%02X",
+                    m_gbCore.cpu.reg.pc,    // 現在のアドレス
+                    opcode,                 // ★重要：その場所にある命令
+                    m_gbCore.mmu.io[0x44],
+                    m_gbCore.cpu.reg.ime,
+                    m_gbCore.mmu.io[0x0F],
+                    m_gbCore.mmu.io[0x07]
+                );
+                SetWindowText(m_hwnd, debugBuf);
+            }
         }
     }
 

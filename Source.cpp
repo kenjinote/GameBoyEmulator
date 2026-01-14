@@ -213,7 +213,11 @@ public:
             }
             else {
                 int bank = (mbcType == 3) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
-                return sram[(bank * 0x2000) + (addr - 0xA000)];
+                int idx = (bank * 0x2000) + (addr - 0xA000);
+                if (idx < sram.size()) {
+                    return sram[idx];
+                }
+                return 0xFF;
             }
         }
         if (addr < 0xE000) return wram[addr - 0xC000];
@@ -806,8 +810,10 @@ private:
                 // PCの位置にある命令コード (Opcode) を取得
                 Byte opcode = m_gbCore.mmu.Read(m_gbCore.cpu.reg.pc);
 
-                swprintf_s(debugBuf, L"PC:%04X OP:%02X LY:%02d IME:%d IF:%02X TAC:%02X",
+                swprintf_s(debugBuf, L"PC:%04X MBC:%d RAM-Bank:%d OP:%02X LY:%02d IME:%d IF:%02X TAC:%02X",
                     m_gbCore.cpu.reg.pc,    // 現在のアドレス
+                    m_gbCore.mmu.mbcType,
+                    m_gbCore.mmu.ramBank,
                     opcode,                 // ★重要：その場所にある命令
                     m_gbCore.mmu.io[0x44],
                     m_gbCore.cpu.reg.ime,

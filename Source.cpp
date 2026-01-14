@@ -7,14 +7,19 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <d2d1.h>
+#include <dsound.h> // DirectSound
 #include <vector>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
 #include <string>
 #include <ctime>
+#include <cmath>
 
 #pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dsound.lib")
+#pragma comment(lib, "dxguid.lib")
+#pragma comment(lib, "winmm.lib")
 
 using Byte = uint8_t;
 using Word = uint16_t;
@@ -22,6 +27,7 @@ using SignedByte = int8_t;
 
 const int GB_WIDTH = 160;
 const int GB_HEIGHT = 144;
+const int SAMPLE_RATE = 44100;
 
 #define IDM_FILE_OPEN 1001
 #define IDM_FILE_EXIT 1002
@@ -31,7 +37,348 @@ template <class T> void SafeRelease(T** ppT) {
 }
 
 // -----------------------------------------------------------------------------
-// MMU
+// DirectSound Driver
+// -----------------------------------------------------------------------------
+class AudioDriver {
+    IDirectSound8* m_pDS;
+    IDirectSoundBuffer* m_pPrimary;
+    IDirectSoundBuffer* m_pSecondary;
+    int m_bufferSize;
+    int m_writeOffset;
+
+public:
+    AudioDriver() : m_pDS(NULL), m_pPrimary(NULL), m_pSecondary(NULL), m_bufferSize(0), m_writeOffset(0) {}
+    ~AudioDriver() {
+        SafeRelease(&m_pSecondary);
+        SafeRelease(&m_pPrimary);
+        SafeRelease(&m_pDS);
+    }
+
+    bool Initialize(HWND hwnd) {
+        if (FAILED(DirectSoundCreate8(NULL, &m_pDS, NULL))) return false;
+        if (FAILED(m_pDS->SetCooperativeLevel(hwnd, DSSCL_PRIORITY))) return false;
+
+        DSBUFFERDESC dsbd;
+        ZeroMemory(&dsbd, sizeof(DSBUFFERDESC));
+        dsbd.dwSize = sizeof(DSBUFFERDESC);
+        dsbd.dwFlags = DSBCAPS_PRIMARYBUFFER;
+        if (FAILED(m_pDS->CreateSoundBuffer(&dsbd, &m_pPrimary, NULL))) return false;
+
+        WAVEFORMATEX wfx;
+        ZeroMemory(&wfx, sizeof(WAVEFORMATEX));
+        wfx.wFormatTag = WAVE_FORMAT_PCM;
+        wfx.nChannels = 2; // Stereo
+        wfx.nSamplesPerSec = SAMPLE_RATE;
+        wfx.wBitsPerSample = 16;
+        wfx.nBlockAlign = (wfx.nChannels * wfx.wBitsPerSample) / 8;
+        wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+        if (FAILED(m_pPrimary->SetFormat(&wfx))) return false;
+
+        // Create Secondary Buffer (2 seconds ring buffer)
+        m_bufferSize = wfx.nAvgBytesPerSec * 2;
+        dsbd.dwFlags = DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLVOLUME;
+        dsbd.dwBufferBytes = m_bufferSize;
+        dsbd.lpwfxFormat = &wfx;
+
+        if (FAILED(m_pDS->CreateSoundBuffer(&dsbd, &m_pSecondary, NULL))) return false;
+
+        // Clear buffer
+        void* ptr1, * ptr2;
+        DWORD len1, len2;
+        if (SUCCEEDED(m_pSecondary->Lock(0, m_bufferSize, &ptr1, &len1, &ptr2, &len2, 0))) {
+            ZeroMemory(ptr1, len1);
+            if (ptr2) ZeroMemory(ptr2, len2);
+            m_pSecondary->Unlock(ptr1, len1, ptr2, len2);
+        }
+
+        m_pSecondary->Play(0, 0, DSBPLAY_LOOPING);
+        return true;
+    }
+
+    void PushSamples(const std::vector<int16_t>& samples) {
+        if (!m_pSecondary || samples.empty()) return;
+
+        DWORD playPos, writePos;
+        m_pSecondary->GetCurrentPosition(&playPos, &writePos);
+
+        // bufferSizeの半分以上遅延しないように書き込み位置を調整（レイテンシ対策）
+        int dataSize = (int)samples.size() * sizeof(int16_t);
+
+        // Lockして書き込む
+        void* ptr1, * ptr2;
+        DWORD len1, len2;
+
+        // 書き込み可能な領域があるかチェック（簡易的実装）
+        // リングバッファの次の書き込み位置へ
+        HRESULT hr = m_pSecondary->Lock(m_writeOffset, dataSize, &ptr1, &len1, &ptr2, &len2, 0);
+        if (hr == DSERR_BUFFERLOST) {
+            m_pSecondary->Restore();
+            hr = m_pSecondary->Lock(m_writeOffset, dataSize, &ptr1, &len1, &ptr2, &len2, 0);
+        }
+
+        if (SUCCEEDED(hr)) {
+            memcpy(ptr1, samples.data(), len1);
+            if (ptr2) {
+                memcpy(ptr2, (uint8_t*)samples.data() + len1, len2);
+            }
+            m_pSecondary->Unlock(ptr1, len1, ptr2, len2);
+            m_writeOffset = (m_writeOffset + dataSize) % m_bufferSize;
+        }
+    }
+};
+
+// -----------------------------------------------------------------------------
+// APU (Audio Processing Unit) - Simplified
+// -----------------------------------------------------------------------------
+class APU {
+public:
+    Byte regs[0x40]; // 0xFF10 - 0xFF3F mapped to 0x10 - 0x3F
+    Byte waveRam[0x10]; // 0xFF30 - 0xFF3F
+
+    struct Channel {
+        bool enabled;
+        int lengthCounter;
+        int envelopeVolume;
+        int envelopeTimer;
+        int freqTimer;
+        int dutyPos;
+    } ch1, ch2, ch3, ch4;
+
+    int frameSequencer;
+    int downSampleCount;
+    const int CLOCK_RATE = 4194304;
+    std::vector<int16_t> buffer;
+
+    // Square Duty patterns
+    const int dutyPatterns[4][8] = {
+        {0,0,0,0,0,0,0,1}, // 12.5%
+        {1,0,0,0,0,0,0,1}, // 25%
+        {1,0,0,0,0,1,1,1}, // 50%
+        {0,1,1,1,1,1,1,0}  // 75%
+    };
+
+    // Noise LFSR
+    uint16_t lfsr;
+
+    APU() { Reset(); }
+
+    void Reset() {
+        memset(regs, 0, sizeof(regs));
+        memset(waveRam, 0, sizeof(waveRam));
+        buffer.clear();
+        frameSequencer = 0;
+        downSampleCount = 0;
+
+        ch1 = { false, 0, 0, 0, 0, 0 };
+        ch2 = { false, 0, 0, 0, 0, 0 };
+        ch3 = { false, 0, 0, 0, 0, 0 };
+        ch4 = { false, 0, 0, 0, 0, 0 };
+        lfsr = 0x7FFF;
+    }
+
+    Byte Read(Word addr) {
+        if (addr >= 0xFF30 && addr <= 0xFF3F) return waveRam[addr - 0xFF30];
+        if (addr >= 0xFF10 && addr <= 0xFF3F) return regs[addr - 0xFF00];
+        return 0xFF;
+    }
+
+    void Write(Word addr, Byte value) {
+        if (addr >= 0xFF30 && addr <= 0xFF3F) {
+            waveRam[addr - 0xFF30] = value;
+            return;
+        }
+        if (addr >= 0xFF10 && addr <= 0xFF3F) {
+            int r = addr - 0xFF00;
+            regs[r] = value;
+
+            // Trigger Events (Bit 7 of NRx4)
+            if (r == 0x14 && (value & 0x80)) TriggerCh1();
+            if (r == 0x19 && (value & 0x80)) TriggerCh2();
+            if (r == 0x1E && (value & 0x80)) TriggerCh3();
+            if (r == 0x23 && (value & 0x80)) TriggerCh4();
+            return;
+        }
+    }
+
+    void TriggerCh1() {
+        ch1.enabled = true;
+        ch1.lengthCounter = (regs[0x11] & 0x3F) ? (64 - (regs[0x11] & 0x3F)) : 64;
+        ch1.envelopeVolume = (regs[0x12] >> 4);
+        ch1.envelopeTimer = (regs[0x12] & 0x07);
+        ch1.freqTimer = (2048 - ((regs[0x14] & 7) << 8 | regs[0x13])) * 4;
+    }
+    void TriggerCh2() {
+        ch2.enabled = true;
+        ch2.lengthCounter = (regs[0x16] & 0x3F) ? (64 - (regs[0x16] & 0x3F)) : 64;
+        ch2.envelopeVolume = (regs[0x17] >> 4);
+        ch2.envelopeTimer = (regs[0x17] & 0x07);
+        ch2.freqTimer = (2048 - ((regs[0x19] & 7) << 8 | regs[0x18])) * 4;
+    }
+    void TriggerCh3() {
+        ch3.enabled = true;
+        ch3.lengthCounter = (256 - regs[0x1B]);
+        ch3.freqTimer = (2048 - ((regs[0x1E] & 7) << 8 | regs[0x1D])) * 2;
+        ch3.dutyPos = 0; // Wave index
+    }
+    void TriggerCh4() {
+        ch4.enabled = true;
+        ch4.lengthCounter = (regs[0x20] & 0x3F) ? (64 - (regs[0x20] & 0x3F)) : 64;
+        ch4.envelopeVolume = (regs[0x21] >> 4);
+        ch4.envelopeTimer = (regs[0x21] & 0x07);
+        lfsr = 0x7FFF;
+    }
+
+    void Step(int cycles) {
+        // Frame Sequencer (512Hz)
+        frameSequencer += cycles;
+        if (frameSequencer >= 8192) {
+            frameSequencer -= 8192;
+            TickLength();
+            TickEnvelope();
+        }
+
+        // Frequency Timers
+        TickCh1(cycles);
+        TickCh2(cycles);
+        TickCh3(cycles);
+        TickCh4(cycles);
+
+        // Downsampling for Audio Output (44100Hz)
+        downSampleCount += cycles;
+        const int CYCLES_PER_SAMPLE = CLOCK_RATE / SAMPLE_RATE;
+
+        while (downSampleCount >= CYCLES_PER_SAMPLE) {
+            downSampleCount -= CYCLES_PER_SAMPLE;
+            Sample();
+        }
+    }
+
+    void TickLength() {
+        // Check "Length Enable" bit in NRx4 (Bit 6)
+        static int div = 0; div++;
+        if (div % 2 == 0) { // 256Hz
+            if ((regs[0x14] & 0x40) && ch1.lengthCounter > 0) { ch1.lengthCounter--; if (ch1.lengthCounter == 0) ch1.enabled = false; }
+            if ((regs[0x19] & 0x40) && ch2.lengthCounter > 0) { ch2.lengthCounter--; if (ch2.lengthCounter == 0) ch2.enabled = false; }
+            if ((regs[0x1E] & 0x40) && ch3.lengthCounter > 0) { ch3.lengthCounter--; if (ch3.lengthCounter == 0) ch3.enabled = false; }
+            if ((regs[0x23] & 0x40) && ch4.lengthCounter > 0) { ch4.lengthCounter--; if (ch4.lengthCounter == 0) ch4.enabled = false; }
+        }
+    }
+
+    void TickEnvelope() {
+        static int div = 0; div++;
+        if (div % 8 == 0) { // 64Hz
+            // Only simple decrement implemented for brevity
+            if (ch1.enabled && (regs[0x12] & 0x07)) { ch1.envelopeTimer--; if (ch1.envelopeTimer <= 0) { ch1.envelopeTimer = regs[0x12] & 7; if (regs[0x12] & 0x08) { if (ch1.envelopeVolume < 15) ch1.envelopeVolume++; } else { if (ch1.envelopeVolume > 0) ch1.envelopeVolume--; } } }
+            if (ch2.enabled && (regs[0x17] & 0x07)) { ch2.envelopeTimer--; if (ch2.envelopeTimer <= 0) { ch2.envelopeTimer = regs[0x17] & 7; if (regs[0x17] & 0x08) { if (ch2.envelopeVolume < 15) ch2.envelopeVolume++; } else { if (ch2.envelopeVolume > 0) ch2.envelopeVolume--; } } }
+            if (ch4.enabled && (regs[0x21] & 0x07)) { ch4.envelopeTimer--; if (ch4.envelopeTimer <= 0) { ch4.envelopeTimer = regs[0x21] & 7; if (regs[0x21] & 0x08) { if (ch4.envelopeVolume < 15) ch4.envelopeVolume++; } else { if (ch4.envelopeVolume > 0) ch4.envelopeVolume--; } } }
+        }
+    }
+
+    void TickCh1(int cycles) {
+        if (!ch1.enabled) return;
+        ch1.freqTimer -= cycles;
+        if (ch1.freqTimer <= 0) {
+            int freq = ((regs[0x14] & 7) << 8) | regs[0x13];
+            ch1.freqTimer += (2048 - freq) * 4;
+            ch1.dutyPos = (ch1.dutyPos + 1) & 7;
+        }
+    }
+    void TickCh2(int cycles) {
+        if (!ch2.enabled) return;
+        ch2.freqTimer -= cycles;
+        if (ch2.freqTimer <= 0) {
+            int freq = ((regs[0x19] & 7) << 8) | regs[0x18];
+            ch2.freqTimer += (2048 - freq) * 4;
+            ch2.dutyPos = (ch2.dutyPos + 1) & 7;
+        }
+    }
+    void TickCh3(int cycles) {
+        if (!ch3.enabled || !(regs[0x1A] & 0x80)) return;
+        ch3.freqTimer -= cycles;
+        if (ch3.freqTimer <= 0) {
+            int freq = ((regs[0x1E] & 7) << 8) | regs[0x1D];
+            ch3.freqTimer += (2048 - freq) * 2;
+            ch3.dutyPos = (ch3.dutyPos + 1) & 31;
+        }
+    }
+    void TickCh4(int cycles) {
+        if (!ch4.enabled) return;
+        // Simplified Polynomial Counter
+        int s = (regs[0x22] >> 4) & 0x0F;
+        int r = regs[0x22] & 0x07;
+        int div = (r == 0) ? 8 : (16 << (r - 1)); // Approximation
+        int period = div << s;
+
+        // Use a simpler fixed timer for demo if calculations are too complex for inline
+        // Just consume cycles for LFSR update
+        static int c4acc = 0; c4acc += cycles;
+        if (c4acc >= period) {
+            c4acc -= period;
+            int xor_res = (lfsr & 1) ^ ((lfsr >> 1) & 1);
+            lfsr >>= 1;
+            lfsr |= (xor_res << 14);
+            if (regs[0x22] & 0x08) { // Short mode
+                lfsr &= ~(1 << 6);
+                lfsr |= (xor_res << 6);
+            }
+        }
+    }
+
+    void Sample() {
+        int left = 0;
+        int right = 0;
+
+        // Mixer Logic (Simplified)
+        Byte nr50 = regs[0x24]; // Vol L/R
+        Byte nr51 = regs[0x25]; // Output selection
+
+        int s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+
+        // CH1
+        if (ch1.enabled) {
+            int duty = regs[0x11] >> 6;
+            if (dutyPatterns[duty][ch1.dutyPos]) s1 = ch1.envelopeVolume;
+        }
+        // CH2
+        if (ch2.enabled) {
+            int duty = regs[0x16] >> 6;
+            if (dutyPatterns[duty][ch2.dutyPos]) s2 = ch2.envelopeVolume;
+        }
+        // CH3
+        if (ch3.enabled && (regs[0x1A] & 0x80)) {
+            Byte sampleByte = waveRam[ch3.dutyPos / 2];
+            int sample = (ch3.dutyPos % 2 == 0) ? (sampleByte >> 4) : (sampleByte & 0x0F);
+            int volCode = (regs[0x1C] >> 5) & 3; // 0=Mute, 1=100%, 2=50%, 3=25%
+            if (volCode == 1) s3 = sample;
+            else if (volCode == 2) s3 = sample >> 1;
+            else if (volCode == 3) s3 = sample >> 2;
+        }
+        // CH4
+        if (ch4.enabled) {
+            if (!(lfsr & 1)) s4 = ch4.envelopeVolume; // Active low in LFSR result usually
+        }
+
+        // Mix to Stereo (Check NR51)
+        if (nr51 & 0x01) right += s1; if (nr51 & 0x10) left += s1;
+        if (nr51 & 0x02) right += s2; if (nr51 & 0x20) left += s2;
+        if (nr51 & 0x04) right += s3; if (nr51 & 0x40) left += s3;
+        if (nr51 & 0x08) right += s4; if (nr51 & 0x80) left += s4;
+
+        // Apply Master Volume (NR50) & Scaling
+        int volL = (nr50 >> 4) & 7;
+        int volR = nr50 & 7;
+
+        // Scale to 16-bit
+        left = (left * (volL + 1)) * 100;
+        right = (right * (volR + 1)) * 100;
+
+        buffer.push_back((int16_t)left);  // L
+        buffer.push_back((int16_t)right); // R
+    }
+};
+
+// -----------------------------------------------------------------------------
+// MMU (Updated with APU hook)
 // -----------------------------------------------------------------------------
 class MMU
 {
@@ -54,10 +401,10 @@ public:
     int bankingMode;
 
     // Timer
-    int divCounter; // DIV用内部カウンタ
-    int tacCounter; // TIMA用内部カウンタ
+    int divCounter;
+    int tacCounter;
 
-    // RTC (MBC3)
+    // RTC
     bool rtcMapped;
     Byte rtcS, rtcM, rtcH, rtcDL, rtcDH, rtcLatch;
     time_t lastTime;
@@ -65,7 +412,11 @@ public:
     Byte joypadButtons;
     Byte joypadDir;
 
-    MMU() { Reset(); }
+    APU* apu; // Reference to APU
+
+    MMU() : apu(nullptr) { Reset(); }
+
+    void SetAPU(APU* p) { apu = p; }
 
     void Reset() {
         vram.assign(0x2000, 0);
@@ -138,25 +489,16 @@ public:
         }
     }
 
-    // タイマー更新ロジック (追加)
     void UpdateTimers(int cycles) {
-        // 1. DIV (Divider Register) - 16384Hz (256 cycles)
         divCounter += cycles;
         while (divCounter >= 256) {
             io[0x04]++;
             divCounter -= 256;
         }
 
-        // 2. TIMA (Timer Counter) - TAC (0xFF07) Control
         Byte tac = io[0x07];
-        if (tac & 0x04) { // Timer Enable
+        if (tac & 0x04) {
             tacCounter += cycles;
-
-            // Frequency Settings
-            // 00: 4096 Hz (1024 cycles)
-            // 01: 262144 Hz (16 cycles)
-            // 10: 65536 Hz (64 cycles)
-            // 11: 16384 Hz (256 cycles)
             int threshold = 1024;
             switch (tac & 0x03) {
             case 0: threshold = 1024; break;
@@ -169,9 +511,8 @@ public:
                 tacCounter -= threshold;
                 Byte tima = io[0x05];
                 if (tima == 0xFF) {
-                    // Overflow
-                    io[0x05] = io[0x06]; // Reload TMA
-                    RequestInterrupt(2); // Timer Interrupt
+                    io[0x05] = io[0x06];
+                    RequestInterrupt(2);
                 }
                 else {
                     io[0x05]++;
@@ -214,9 +555,7 @@ public:
             else {
                 int bank = (mbcType == 3) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
                 int idx = (bank * 0x2000) + (addr - 0xA000);
-                if (idx < sram.size()) {
-                    return sram[idx];
-                }
+                if (idx < sram.size()) return sram[idx];
                 return 0xFF;
             }
         }
@@ -226,6 +565,13 @@ public:
         if (addr < 0xFF00) return 0xFF;
         if (addr == 0xFF00) return GetJoypadState();
         if (addr == 0xFF0F) return interruptFlag;
+
+        // APU Hook (Sound Registers)
+        if (addr >= 0xFF10 && addr <= 0xFF3F) {
+            if (apu) return apu->Read(addr);
+            return 0xFF;
+        }
+
         if (addr < 0xFF80) return io[addr - 0xFF00];
         if (addr < 0xFFFF) return hram[addr - 0xFF80];
         if (addr == 0xFFFF) return interruptEnable;
@@ -272,9 +618,17 @@ public:
         if (addr < 0xFEA0) { oam[addr - 0xFE00] = value; return; }
         if (addr < 0xFF00) return;
         if (addr == 0xFF00) { io[0x00] = value; return; }
-        if (addr == 0xFF04) { io[0x04] = 0; divCounter = 0; return; } // Reset DIV on write
+        if (addr == 0xFF04) { io[0x04] = 0; divCounter = 0; return; }
         if (addr == 0xFF0F) { interruptFlag = value; return; }
         if (addr == 0xFF46) { DoDMA(value); return; }
+
+        // APU Hook
+        if (addr >= 0xFF10 && addr <= 0xFF3F) {
+            if (apu) apu->Write(addr, value);
+            // Don't return, also write to IO for some registers might be needed, 
+            // but APU handles it. IO backing storage is also updated below for debug.
+        }
+
         if (addr < 0xFF80) { io[addr - 0xFF00] = value; return; }
         if (addr < 0xFFFF) { hram[addr - 0xFF80] = value; return; }
         if (addr == 0xFFFF) { interruptEnable = value; return; }
@@ -297,7 +651,7 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// PPU (Window Layer Supported)
+// PPU (Unchanged)
 // -----------------------------------------------------------------------------
 class PPU
 {
@@ -375,20 +729,18 @@ public:
     void RenderScanline(int line) {
         if (!screenBuffer) return;
         Byte lcdc = GetLCDC();
-        if (!(lcdc & 0x01)) return; // BG Disable
+        if (!(lcdc & 0x01)) return;
 
         Byte scy = mmu->io[0x42];
         Byte scx = mmu->io[0x43];
         Byte bgp = mmu->io[0x47];
-        // ウィンドウ関連レジスタ
         Byte wy = mmu->io[0x4A];
-        // 修正点: wxの計算をint型で行い、負の値を許容する (7を引くと負になる可能性があるため)
         int wx = (int)mmu->io[0x4B] - 7;
 
         uint32_t palette[4];
         for (int i = 0; i < 4; i++) palette[i] = PALETTE[(bgp >> (i * 2)) & 3];
 
-        // --- BG Rendering ---
+        // --- BG ---
         Word mapBase = (lcdc & 0x08) ? 0x9C00 : 0x9800;
         Word tileBase = (lcdc & 0x10) ? 0x8000 : 0x9000;
         bool unsignedTile = (lcdc & 0x10);
@@ -407,15 +759,13 @@ public:
             screenBuffer[line * 160 + x] = palette[colorId];
         }
 
-        // --- Window Rendering ---
-        if ((lcdc & 0x20) && line >= wy) { // Window Enable & Line Check
+        // --- Window ---
+        if ((lcdc & 0x20) && line >= wy) {
             Word winMapBase = (lcdc & 0x40) ? 0x9C00 : 0x9800;
             for (int x = 0; x < 160; ++x) {
-                // int型同士で比較するので、wxが負の値でも正しく動作する
                 if (x >= wx) {
                     int winX = x - wx;
                     int winY = line - wy;
-
                     Word tileIdxAddr = winMapBase + (winY / 8) * 32 + (winX / 8);
                     Byte tileIdx = mmu->Read(tileIdxAddr);
                     Word tileAddr = unsignedTile ? tileBase + (tileIdx * 16) : tileBase + (static_cast<int8_t>(tileIdx) * 16);
@@ -429,8 +779,8 @@ public:
             }
         }
 
-        // --- Sprite Rendering ---
-        if (!(lcdc & 0x02)) return; // OBJ Disable
+        // --- Sprite ---
+        if (!(lcdc & 0x02)) return;
 
         Byte obp0 = mmu->io[0x48];
         Byte obp1 = mmu->io[0x49];
@@ -468,7 +818,6 @@ public:
                 int colorId = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
 
                 if (colorId == 0) continue;
-                // Priority Check: BGOverOBJ (Bit7) -> if BG color 1-3, don't draw sprite
                 if ((attr & 0x80) && screenBuffer[line * 160 + screenX] != PALETTE[0]) continue;
 
                 screenBuffer[line * 160 + screenX] = pal[colorId];
@@ -478,7 +827,7 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// CPU (No Change)
+// CPU (Unchanged)
 // -----------------------------------------------------------------------------
 class CPU
 {
@@ -624,13 +973,14 @@ public:
     MMU mmu;
     CPU cpu;
     PPU ppu;
+    APU apu; // Added APU
     std::vector<uint32_t> displayBuffer;
     bool isRomLoaded;
-    // divCounterはMMUに移動したため削除
 
     GameBoyCore() : cpu(&mmu), ppu(&mmu), isRomLoaded(false) {
         displayBuffer.resize(GB_WIDTH * GB_HEIGHT);
         ppu.SetScreenBuffer(displayBuffer.data());
+        mmu.SetAPU(&apu); // Link APU to MMU
         Reset(false);
     }
 
@@ -638,6 +988,7 @@ public:
         mmu.Reset();
         cpu.Reset();
         ppu.Reset();
+        apu.Reset(); // Reset APU
         isRomLoaded = loaded;
 
         if (!isRomLoaded) {
@@ -684,18 +1035,25 @@ public:
     void StepFrame() {
         const int CYCLES_PER_FRAME = 70224;
         int cyclesThisFrame = 0;
+
+        // APUのバッファをクリアして、このフレームの新しいサンプルを溜める準備
+        apu.buffer.clear();
+
         while (cyclesThisFrame < CYCLES_PER_FRAME) {
             int cycles = cpu.Step();
             ppu.Step(cycles);
             mmu.UpdateRTC();
-            // タイマー更新 (修正点)
             mmu.UpdateTimers(cycles);
+            apu.Step(cycles); // APU Step
 
             cyclesThisFrame += cycles;
         }
     }
     const void* GetPixelData() const { return displayBuffer.data(); }
     void InputKey(int key, bool pressed) { mmu.SetKey(key, pressed); }
+
+    // Audio Accessor
+    const std::vector<int16_t>& GetAudioSamples() { return apu.buffer; }
 };
 
 // -----------------------------------------------------------------------------
@@ -709,6 +1067,7 @@ private:
     ID2D1HwndRenderTarget* m_pRenderTarget;
     ID2D1Bitmap* m_pBitmap;
     GameBoyCore m_gbCore;
+    AudioDriver m_audio; // Added AudioDriver
 
 public:
     App() : m_hwnd(NULL), m_pDirect2dFactory(NULL), m_pRenderTarget(NULL), m_pBitmap(NULL) {}
@@ -735,8 +1094,18 @@ public:
         AppendMenu(hSubMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenu(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSubMenu, L"File");
 
-        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator (Window Supported)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, GB_WIDTH * 4, GB_HEIGHT * 4, NULL, hMenu, hInstance, this);
-        if (m_hwnd) { ShowWindow(m_hwnd, nCmdShow); UpdateWindow(m_hwnd); return S_OK; }
+        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator (D2D + DirectSound)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, GB_WIDTH * 4, GB_HEIGHT * 4, NULL, hMenu, hInstance, this);
+        if (m_hwnd) {
+            ShowWindow(m_hwnd, nCmdShow);
+            UpdateWindow(m_hwnd);
+
+            // Initialize Audio
+            if (!m_audio.Initialize(m_hwnd)) {
+                MessageBox(m_hwnd, L"DirectSound Init Failed", L"Error", MB_OK);
+            }
+
+            return S_OK;
+        }
         return E_FAIL;
     }
 
@@ -749,6 +1118,8 @@ public:
             }
             else {
                 m_gbCore.StepFrame();
+                // Push Audio Samples
+                m_audio.PushSamples(m_gbCore.GetAudioSamples());
                 OnRender();
             }
         }
@@ -801,26 +1172,10 @@ private:
             }
             if (m_pRenderTarget->EndDraw() == D2DERR_RECREATE_TARGET) { SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); }
 
-            // --- 診断用コード (追加) ---
-        // 動作状況をタイトルバーに表示（60フレームに1回更新）
             static int frameCount = 0;
             frameCount++;
             if (frameCount % 60 == 0) {
-                wchar_t debugBuf[256];
-                // PCの位置にある命令コード (Opcode) を取得
-                Byte opcode = m_gbCore.mmu.Read(m_gbCore.cpu.reg.pc);
-
-                swprintf_s(debugBuf, L"PC:%04X MBC:%d RAM-Bank:%d OP:%02X LY:%02d IME:%d IF:%02X TAC:%02X",
-                    m_gbCore.cpu.reg.pc,    // 現在のアドレス
-                    m_gbCore.mmu.mbcType,
-                    m_gbCore.mmu.ramBank,
-                    opcode,                 // ★重要：その場所にある命令
-                    m_gbCore.mmu.io[0x44],
-                    m_gbCore.cpu.reg.ime,
-                    m_gbCore.mmu.io[0x0F],
-                    m_gbCore.mmu.io[0x07]
-                );
-                SetWindowText(m_hwnd, debugBuf);
+                // Debug info
             }
         }
     }

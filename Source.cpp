@@ -39,7 +39,7 @@ template <class T> void SafeRelease(T** ppT) {
 }
 
 // -----------------------------------------------------------------------------
-// AudioDriver (★修正: Pause/Resume対応版)
+// AudioDriver
 // -----------------------------------------------------------------------------
 class AudioDriver {
     IDirectSound8* m_pDS;
@@ -74,7 +74,6 @@ public:
         wfx.nAvgBytesPerSec = SAMPLE_RATE * 4;
         if (FAILED(m_pPrimary->SetFormat(&wfx))) return false;
 
-        // レイテンシを抑えるためバッファサイズを調整
         m_bufferSize = wfx.nAvgBytesPerSec / 10;
         dsbd.dwFlags = DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLVOLUME;
         dsbd.dwBufferBytes = m_bufferSize;
@@ -97,7 +96,6 @@ public:
         m_nextWriteOffset = 0;
     }
 
-    // ★追加: 一時停止と再開
     void Pause() {
         if (m_pSecondary) m_pSecondary->Stop();
     }
@@ -140,19 +138,18 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// APU (★修正: スイープ、エンベロープ、NR52ステータス完備版)
+// APU
 // -----------------------------------------------------------------------------
 class APU {
 public:
     Byte regs[0x40];
     Byte waveRam[0x10];
 
-    // スイープ管理用構造体
     struct Sweep {
-        int period;      // レジスタ値
-        int timer;       // カウンタ
-        bool enabled;    // 有効フラグ
-        int shadowFreq;  // 内部周波数
+        int period;
+        int timer;
+        bool enabled;
+        int shadowFreq;
     };
 
     struct Channel {
@@ -162,8 +159,8 @@ public:
         int envelopeTimer;
         int freqTimer;
         int dutyPos;
-        int period;      // 周波数（タイマーリロード用）
-        Sweep sweep;     // Ch1専用
+        int period;
+        Sweep sweep;
     } ch1, ch2, ch3, ch4;
 
     int frameSequencer;
@@ -186,37 +183,22 @@ public:
         frameSequencer = 0;
         accL = 0; accR = 0; accCount = 0;
 
-        // 構造体の初期化
         memset(&ch1, 0, sizeof(Channel));
         memset(&ch2, 0, sizeof(Channel));
         memset(&ch3, 0, sizeof(Channel));
         memset(&ch4, 0, sizeof(Channel));
 
         lfsr = 0x7FFF;
-
-        // ★初期化: NR52 (0xFF26) の電源ONビットを立てる
-        // regsは 0xFF10 からのマッピングなので 0xFF26 - 0xFF10 = 0x16 ではなく、
-        // 以前のコードの仕様に合わせて regs[0x26] (0xFF00からのオフセットとして利用していた場合) 
-        // またはこのクラスのregsサイズ(0x40)に合わせて調整。
-        // ここでは配列インデックスを安全にするため、Read/Writeでオフセット計算を一貫させる。
-        // Reset内で直接書く場合は注意。Write関数を通すか、直接書くならオフセットを合わせる。
-        // 配列 regs はサイズ 0x40 なので、0xFF10番地は regs[0x10] に入る想定で実装します。
-
-        regs[0x26] = 0xF1; // 0xFF26 - 0xFF00 = 0x26
+        regs[0x26] = 0xF1;
     }
 
-    // ★修正: NR52 (0xFF26) の読み込み時に現在の再生状態を返す
-    // これにより「音が鳴り止むのを待つ」ゲームロジックが正常に動作し、画面遷移するようになる
     Byte Read(Word addr) {
         if (addr >= 0xFF30 && addr <= 0xFF3F) return waveRam[addr - 0xFF30];
         if (addr >= 0xFF10 && addr <= 0xFF3F) {
-            // オフセット計算: 0xFF10 -> 0x10
             int r = addr - 0xFF00;
             Byte val = regs[r];
-
-            // NR52: Audio Master Control
             if (addr == 0xFF26) {
-                val = (val & 0xF0); // 上位ビットは保持
+                val = (val & 0xF0);
                 if (ch1.enabled) val |= 0x01;
                 if (ch2.enabled) val |= 0x02;
                 if (ch3.enabled) val |= 0x04;
@@ -232,53 +214,44 @@ public:
         if (addr >= 0xFF10 && addr <= 0xFF3F) {
             int r = addr - 0xFF00;
             regs[r] = value;
-
-            // 各チャンネルのトリガー処理
             if (r == 0x14 && (value & 0x80)) TriggerCh1();
             if (r == 0x19 && (value & 0x80)) TriggerCh2();
             if (r == 0x1E && (value & 0x80)) TriggerCh3();
             if (r == 0x23 && (value & 0x80)) TriggerCh4();
-
-            // NR52 (Power Control)
             if (r == 0x26) {
-                if (!(value & 0x80)) { // APU OFF
+                if (!(value & 0x80)) {
                     Reset();
-                    regs[0x26] = 0x00; // Keep OFF
+                    regs[0x26] = 0x00;
                 }
             }
         }
     }
 
-    // スイープ周波数計算
     int CalcNewFreq() {
         int shift = regs[0x10] & 0x07;
         int diff = ch1.sweep.shadowFreq >> shift;
         int newFreq = ch1.sweep.shadowFreq;
-        if (regs[0x10] & 0x08) newFreq -= diff; // 減算
-        else newFreq += diff; // 加算
+        if (regs[0x10] & 0x08) newFreq -= diff;
+        else newFreq += diff;
         return newFreq;
     }
 
     void TriggerCh1() {
         ch1.enabled = true;
-        // Length
         int lenVal = regs[0x11] & 0x3F;
         ch1.lengthCounter = lenVal ? (64 - lenVal) : 64;
-        // Envelope
         ch1.envelopeVolume = (regs[0x12] >> 4);
         ch1.envelopeTimer = (regs[0x12] & 0x07);
-        // Frequency
         ch1.period = (2048 - ((regs[0x14] & 7) << 8 | regs[0x13])) * 4;
         ch1.freqTimer = ch1.period;
 
-        // ★Sweep Init
         int sweepPeriod = (regs[0x10] >> 4) & 0x07;
         int sweepShift = regs[0x10] & 0x07;
         ch1.sweep.period = sweepPeriod ? sweepPeriod : 8;
         ch1.sweep.timer = ch1.sweep.period;
         ch1.sweep.shadowFreq = ((regs[0x14] & 7) << 8 | regs[0x13]);
         ch1.sweep.enabled = (sweepPeriod > 0 || sweepShift > 0);
-        if (sweepShift > 0) { // Overflow check on trigger
+        if (sweepShift > 0) {
             if (CalcNewFreq() > 2047) ch1.enabled = false;
         }
     }
@@ -312,14 +285,12 @@ public:
     }
 
     void Step(int cycles) {
-        // Frame Sequencer (512Hz)
         frameSequencer += cycles;
         if (frameSequencer >= 8192) {
             frameSequencer -= 8192;
             static int step = 0;
             step = (step + 1) & 7;
 
-            // Length Control (256Hz: Steps 0, 2, 4, 6)
             if (!(step & 1)) {
                 if ((regs[0x14] & 0x40) && ch1.lengthCounter > 0 && --ch1.lengthCounter == 0) ch1.enabled = false;
                 if ((regs[0x19] & 0x40) && ch2.lengthCounter > 0 && --ch2.lengthCounter == 0) ch2.enabled = false;
@@ -327,7 +298,6 @@ public:
                 if ((regs[0x23] & 0x40) && ch4.lengthCounter > 0 && --ch4.lengthCounter == 0) ch4.enabled = false;
             }
 
-            // ★Sweep (128Hz: Steps 2, 6)
             if (step == 2 || step == 6) {
                 if (ch1.sweep.enabled && ch1.enabled) {
                     if (--ch1.sweep.timer <= 0) {
@@ -339,7 +309,7 @@ public:
                                 ch1.sweep.shadowFreq = newFreq;
                                 regs[0x13] = newFreq & 0xFF;
                                 regs[0x14] = (regs[0x14] & 0xF8) | ((newFreq >> 8) & 0x07);
-                                ch1.period = (2048 - newFreq) * 4; // Update active timer
+                                ch1.period = (2048 - newFreq) * 4;
                                 if (CalcNewFreq() > 2047) ch1.enabled = false;
                             }
                             else if (newFreq > 2047) {
@@ -350,7 +320,6 @@ public:
                 }
             }
 
-            // Envelope (64Hz: Step 7)
             if (step == 7) {
                 auto DoEnv = [&](Channel& ch, Byte reg) {
                     if (ch.enabled && (reg & 7) && --ch.envelopeTimer <= 0) {
@@ -365,9 +334,6 @@ public:
             }
         }
 
-        // --- Timer & Mixer Logic ---
-
-        // CH1 (Square)
         int s1 = 0;
         if (ch1.enabled) {
             ch1.freqTimer -= cycles;
@@ -378,7 +344,6 @@ public:
             if (dutyPatterns[regs[0x11] >> 6][ch1.dutyPos]) s1 = ch1.envelopeVolume;
         }
 
-        // CH2 (Square)
         int s2 = 0;
         if (ch2.enabled) {
             ch2.freqTimer -= cycles;
@@ -389,7 +354,6 @@ public:
             if (dutyPatterns[regs[0x16] >> 6][ch2.dutyPos]) s2 = ch2.envelopeVolume;
         }
 
-        // CH3 (Wave)
         int s3 = 0;
         if (ch3.enabled && (regs[0x1A] & 0x80)) {
             ch3.freqTimer -= cycles;
@@ -406,7 +370,6 @@ public:
             else if (vCode == 3) s3 = s >> 2;
         }
 
-        // CH4 (Noise)
         int s4 = 0;
         if (ch4.enabled) {
             int divCode = regs[0x22] & 7;
@@ -419,7 +382,7 @@ public:
                 int xorBit = (lfsr & 1) ^ ((lfsr >> 1) & 1);
                 lfsr >>= 1;
                 lfsr |= (xorBit << 14);
-                if (regs[0x22] & 8) { // Short width
+                if (regs[0x22] & 8) {
                     lfsr &= ~(1 << 6);
                     lfsr |= (xorBit << 6);
                 }
@@ -427,22 +390,19 @@ public:
             if (!(lfsr & 1)) s4 = ch4.envelopeVolume;
         }
 
-        // Mixing
         int l = 0, r = 0;
-        Byte nr51 = regs[0x25]; // L/R selection
+        Byte nr51 = regs[0x25];
         if (nr51 & 0x01) r += s1; if (nr51 & 0x10) l += s1;
         if (nr51 & 0x02) r += s2; if (nr51 & 0x20) l += s2;
         if (nr51 & 0x04) r += s3; if (nr51 & 0x40) l += s3;
         if (nr51 & 0x08) r += s4; if (nr51 & 0x80) l += s4;
 
-        // Master Volume
         Byte nr50 = regs[0x24];
         int volL = (nr50 >> 4) & 7;
         int volR = nr50 & 7;
         l = l * (volL + 1);
         r = r * (volR + 1);
 
-        // Simple averaging for downsampling
         accL += l * cycles;
         accR += r * cycles;
         accCount += cycles;
@@ -463,7 +423,7 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// MMU (APU Hook Integrated)
+// MMU
 // -----------------------------------------------------------------------------
 class MMU
 {
@@ -481,6 +441,7 @@ public:
 
     int mbcType;
     bool ramEnable;
+    bool hasBattery; // ★追加: バッテリーバックアップ有無
     int romBank;
     int ramBank;
     int bankingMode;
@@ -507,6 +468,7 @@ public:
         interruptFlag = 0; interruptEnable = 0; mbcType = 0; ramEnable = false; romBank = 1; ramBank = 0; bankingMode = 0;
         divCounter = 0; tacCounter = 0; rtcMapped = false; rtcS = rtcM = rtcH = rtcDL = rtcDH = rtcLatch = 0; lastTime = time(NULL);
         joypadButtons = 0x0F; joypadDir = 0x0F;
+        hasBattery = false; // ★追加
     }
 
     void LoadRomData(const std::vector<Byte>& data) {
@@ -520,7 +482,48 @@ public:
         else if (type >= 0x01 && type <= 0x03) mbcType = 1; // MBC1
         else mbcType = 0;
 
+        // ★追加: バッテリー判定
+        // 03, 06, 09, 0F, 10, 13, 1B, 1E, FF 等がBatteryあり
+        if (type == 0x03 || type == 0x06 || type == 0x09 || type == 0x0F ||
+            type == 0x10 || type == 0x13 || type == 0x1B || type == 0x1E || type == 0xFF) {
+            hasBattery = true;
+        }
+        else {
+            hasBattery = false;
+        }
+
         ramEnable = false; romBank = 1; ramBank = 0; bankingMode = 0; rtcMapped = false;
+    }
+
+    // ★追加: セーブデータの読み込み
+    void LoadRAM(const std::wstring& path) {
+        if (!hasBattery) return;
+        FILE* fp = NULL;
+        _wfopen_s(&fp, path.c_str(), L"rb");
+        if (fp) {
+            // ファイルサイズ分だけ読み込む（sramサイズを超えない範囲で）
+            fseek(fp, 0, SEEK_END);
+            long size = ftell(fp);
+            fseek(fp, 0, SEEK_SET);
+
+            if (size > 0) {
+                if (size > (long)sram.size()) size = (long)sram.size();
+                fread(sram.data(), 1, size, fp);
+            }
+            fclose(fp);
+        }
+    }
+
+    // ★追加: セーブデータの書き込み
+    void SaveRAM(const std::wstring& path) {
+        if (!hasBattery) return;
+        FILE* fp = NULL;
+        _wfopen_s(&fp, path.c_str(), L"wb");
+        if (fp) {
+            // SRAM全体をダンプ (本来はRAMサイズを見て切り詰めるのが望ましいが、簡易実装としてフルダンプ)
+            fwrite(sram.data(), 1, sram.size(), fp);
+            fclose(fp);
+        }
     }
 
     void RequestInterrupt(int bit) { interruptFlag |= (1 << bit); }
@@ -623,8 +626,6 @@ public:
         if (addr == 0xFF00) return GetJoypadState();
         if (addr == 0xFF0F) return interruptFlag;
 
-        // APU Hook (Sound Registers)
-        // Note: New APU handles NR52 correctly for Read logic
         if (addr >= 0xFF10 && addr <= 0xFF3F) {
             if (apu) return apu->Read(addr);
             return 0xFF;
@@ -680,7 +681,6 @@ public:
         if (addr == 0xFF0F) { interruptFlag = value; return; }
         if (addr == 0xFF46) { DoDMA(value); return; }
 
-        // APU Hook
         if (addr >= 0xFF10 && addr <= 0xFF3F) {
             if (apu) apu->Write(addr, value);
         }
@@ -707,7 +707,7 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// PPU (Unchanged)
+// PPU
 // -----------------------------------------------------------------------------
 class PPU
 {
@@ -796,7 +796,6 @@ public:
         uint32_t palette[4];
         for (int i = 0; i < 4; i++) palette[i] = PALETTE[(bgp >> (i * 2)) & 3];
 
-        // --- BG ---
         Word mapBase = (lcdc & 0x08) ? 0x9C00 : 0x9800;
         Word tileBase = (lcdc & 0x10) ? 0x8000 : 0x9000;
         bool unsignedTile = (lcdc & 0x10);
@@ -815,7 +814,6 @@ public:
             screenBuffer[line * 160 + x] = palette[colorId];
         }
 
-        // --- Window ---
         if ((lcdc & 0x20) && line >= wy) {
             Word winMapBase = (lcdc & 0x40) ? 0x9C00 : 0x9800;
             for (int x = 0; x < 160; ++x) {
@@ -835,7 +833,6 @@ public:
             }
         }
 
-        // --- Sprite ---
         if (!(lcdc & 0x02)) return;
 
         Byte obp0 = mmu->io[0x48];
@@ -883,7 +880,7 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// CPU (Unchanged)
+// CPU
 // -----------------------------------------------------------------------------
 class CPU
 {
@@ -1032,6 +1029,7 @@ public:
     APU apu;
     std::vector<uint32_t> displayBuffer;
     bool isRomLoaded;
+    std::wstring m_savePath; // ★追加: セーブファイルパス
 
     GameBoyCore() : cpu(&mmu), ppu(&mmu), isRomLoaded(false) {
         displayBuffer.resize(GB_WIDTH * GB_HEIGHT);
@@ -1078,10 +1076,27 @@ public:
             fclose(fp);
             Reset(true);
             mmu.LoadRomData(buffer);
+
+            // ★追加: セーブデータのパスを作成して読み込む (拡張子を .sav に変更)
+            m_savePath = path;
+            size_t dotPos = m_savePath.find_last_of(L'.');
+            if (dotPos != std::string::npos) {
+                m_savePath = m_savePath.substr(0, dotPos);
+            }
+            m_savePath += L".sav";
+            mmu.LoadRAM(m_savePath);
+
             return true;
         }
         fclose(fp);
         return false;
+    }
+
+    // ★追加: セーブ実行
+    void SaveRAM() {
+        if (isRomLoaded && !m_savePath.empty()) {
+            mmu.SaveRAM(m_savePath);
+        }
     }
 
     std::string GetTitle() {
@@ -1092,7 +1107,6 @@ public:
         const int CYCLES_PER_FRAME = 70224;
         int cyclesThisFrame = 0;
 
-        // APUのバッファをクリアして、このフレームの新しいサンプルを溜める準備
         apu.buffer.clear();
 
         while (cyclesThisFrame < CYCLES_PER_FRAME) {
@@ -1100,15 +1114,13 @@ public:
             ppu.Step(cycles);
             mmu.UpdateRTC();
             mmu.UpdateTimers(cycles);
-            apu.Step(cycles); // APU Step
+            apu.Step(cycles);
 
             cyclesThisFrame += cycles;
         }
     }
     const void* GetPixelData() const { return displayBuffer.data(); }
     void InputKey(int key, bool pressed) { mmu.SetKey(key, pressed); }
-
-    // Audio Accessor
     const std::vector<int16_t>& GetAudioSamples() { return apu.buffer; }
 };
 
@@ -1123,14 +1135,16 @@ private:
     ID2D1HwndRenderTarget* m_pRenderTarget;
     ID2D1Bitmap* m_pBitmap;
     GameBoyCore m_gbCore;
-    AudioDriver m_audio; // Added AudioDriver
+    AudioDriver m_audio;
 
 public:
     App() : m_hwnd(NULL), m_pDirect2dFactory(NULL), m_pRenderTarget(NULL), m_pBitmap(NULL) {}
-    ~App() { SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); SafeRelease(&m_pDirect2dFactory); }
+    ~App() {
+        m_gbCore.SaveRAM(); // ★追加: デストラクタでも一応保存
+        SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); SafeRelease(&m_pDirect2dFactory);
+    }
 
     HRESULT Initialize(HINSTANCE hInstance, int nCmdShow) {
-        // SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &m_pDirect2dFactory);
         WNDCLASSEX wcex = { sizeof(WNDCLASSEX) };
         wcex.style = CS_HREDRAW | CS_VREDRAW;
@@ -1139,7 +1153,7 @@ public:
         wcex.cbWndExtra = sizeof(LONG_PTR);
         wcex.hInstance = hInstance;
         wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wcex.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH); // 背景を黒に設定
+        wcex.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
         wcex.lpszClassName = L"D2DGameBoyWnd";
         RegisterClassEx(&wcex);
 
@@ -1150,16 +1164,14 @@ public:
         AppendMenu(hSubMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenu(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSubMenu, L"File");
 
-        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator (D2D + DirectSound)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, GB_WIDTH * 4, GB_HEIGHT * 4, NULL, hMenu, hInstance, this);
+        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator (D2D + DS + Save)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, GB_WIDTH * 4, GB_HEIGHT * 4, NULL, hMenu, hInstance, this);
         if (m_hwnd) {
             ShowWindow(m_hwnd, nCmdShow);
             UpdateWindow(m_hwnd);
 
-            // Initialize Audio
             if (!m_audio.Initialize(m_hwnd)) {
                 MessageBox(m_hwnd, L"DirectSound Init Failed", L"Error", MB_OK);
             }
-
             return S_OK;
         }
         return E_FAIL;
@@ -1173,7 +1185,6 @@ public:
                 TranslateMessage(&msg); DispatchMessage(&msg);
             }
             else {
-                // 音声同期: バッファの空き容量をチェックしてウェイトを入れる
                 const int BYTES_PER_FRAME = (SAMPLE_RATE / 60) * 2 * sizeof(int16_t);
                 int freeSpace = m_audio.GetBufferFreeSpace();
 
@@ -1200,9 +1211,11 @@ private:
         ofn.lpstrFilter = L"GameBoy ROMs\0*.gb;*.gbc\0All Files\0*.*\0"; ofn.nFilterIndex = 1;
         ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 
-        PauseAudio(); // ダイアログ前に停止
+        PauseAudio();
 
         if (GetOpenFileName(&ofn) == TRUE) {
+            m_gbCore.SaveRAM(); // ★追加: 新しいROMを読む前に現在のセーブを保存
+
             if (m_gbCore.LoadRom(szFile)) {
                 std::string titleStr = m_gbCore.GetTitle();
                 std::wstring wTitle(titleStr.begin(), titleStr.end());
@@ -1214,7 +1227,7 @@ private:
             }
         }
 
-        ResumeAudio(); // ダイアログ後に再開
+        ResumeAudio();
     }
 
     HRESULT CreateDeviceResources() {
@@ -1250,7 +1263,10 @@ private:
         App* pApp = reinterpret_cast<App*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
         switch (message) {
         case WM_CREATE: { LPCREATESTRUCT pCreate = reinterpret_cast<LPCREATESTRUCT>(lParam); pApp = reinterpret_cast<App*>(pCreate->lpCreateParams); SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)pApp); return 0; }
-        case WM_COMMAND: if (LOWORD(wParam) == IDM_FILE_OPEN && pApp) pApp->OnFileOpen(); if (LOWORD(wParam) == IDM_FILE_EXIT) DestroyWindow(hwnd); return 0;
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDM_FILE_OPEN && pApp) pApp->OnFileOpen();
+            if (LOWORD(wParam) == IDM_FILE_EXIT) DestroyWindow(hwnd);
+            return 0;
         case WM_SIZE: if (pApp && pApp->m_pRenderTarget) pApp->m_pRenderTarget->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam))); return 0;
         case WM_KEYDOWN: case WM_KEYUP:
             if (pApp) {
@@ -1264,7 +1280,6 @@ private:
             }
             return 0;
 
-            // ★追加: メニュー操作中やウィンドウ移動中は音を止める
         case WM_ENTERMENULOOP:
         case WM_ENTERSIZEMOVE:
             if (pApp) pApp->PauseAudio();
@@ -1275,14 +1290,23 @@ private:
             if (pApp) pApp->ResumeAudio();
             return 0;
 
-        case WM_DESTROY: PostQuitMessage(0); return 0;
+            // ★追加: アプリ終了時にセーブ
+        case WM_CLOSE:
+            if (pApp) pApp->m_gbCore.SaveRAM();
+            DestroyWindow(hwnd);
+            return 0;
+
+        case WM_DESTROY:
+            if (pApp) pApp->m_gbCore.SaveRAM(); // 安全のためここでも呼ぶ
+            PostQuitMessage(0);
+            return 0;
         }
         return DefWindowProc(hwnd, message, wParam, lParam);
     }
 };
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
-    CoInitialize(NULL); // DirectSoundのために必要
+    CoInitialize(NULL);
     App app;
     if (SUCCEEDED(app.Initialize(hInstance, nCmdShow))) app.RunMessageLoop();
     CoUninitialize();

@@ -15,13 +15,13 @@
 #include <string>
 #include <ctime>
 #include <cmath>
-#include <algorithm> // for std::fill
+#include <algorithm>
 
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dsound.lib")
 #pragma comment(lib, "dxguid.lib")
 #pragma comment(lib, "winmm.lib")
-#pragma comment(lib, "ole32.lib") // CoInitialize用
+#pragma comment(lib, "ole32.lib")
 
 using Byte = uint8_t;
 using Word = uint16_t;
@@ -37,6 +37,13 @@ const int SAMPLE_RATE = 44100;
 template <class T> void SafeRelease(T** ppT) {
     if (*ppT) { (*ppT)->Release(); *ppT = NULL; }
 }
+
+// 前方宣言
+class APU;
+class MMU;
+class PPU;
+class CPU;
+class GameBoyCore;
 
 // -----------------------------------------------------------------------------
 // AudioDriver
@@ -96,13 +103,8 @@ public:
         m_nextWriteOffset = 0;
     }
 
-    void Pause() {
-        if (m_pSecondary) m_pSecondary->Stop();
-    }
-
-    void Resume() {
-        if (m_pSecondary) m_pSecondary->Play(0, 0, DSBPLAY_LOOPING);
-    }
+    void Pause() { if (m_pSecondary) m_pSecondary->Stop(); }
+    void Resume() { if (m_pSecondary) m_pSecondary->Play(0, 0, DSBPLAY_LOOPING); }
 
     int GetBufferFreeSpace() {
         if (!m_pSecondary) return 0;
@@ -111,7 +113,6 @@ public:
         int freeSpace = 0;
         if ((int)play > m_nextWriteOffset) freeSpace = (int)play - m_nextWriteOffset;
         else freeSpace = m_bufferSize - (m_nextWriteOffset - (int)play);
-
         int safety = 1024;
         if (freeSpace > safety) freeSpace -= safety; else freeSpace = 0;
         return freeSpace;
@@ -119,15 +120,13 @@ public:
 
     void PushSamples(const std::vector<int16_t>& samples) {
         if (!m_pSecondary || samples.empty()) return;
-        int size = (int)samples.size() * 2; // byte size
+        int size = (int)samples.size() * 2;
         void* p1, * p2; DWORD l1, l2;
-
         HRESULT hr = m_pSecondary->Lock(m_nextWriteOffset, size, &p1, &l1, &p2, &l2, 0);
         if (hr == DSERR_BUFFERLOST) {
             m_pSecondary->Restore();
             hr = m_pSecondary->Lock(m_nextWriteOffset, size, &p1, &l1, &p2, &l2, 0);
         }
-
         if (SUCCEEDED(hr)) {
             memcpy(p1, samples.data(), l1);
             if (p2) memcpy(p2, (uint8_t*)samples.data() + l1, l2);
@@ -144,286 +143,126 @@ class APU {
 public:
     Byte regs[0x40];
     Byte waveRam[0x10];
-
-    struct Sweep {
-        int period;
-        int timer;
-        bool enabled;
-        int shadowFreq;
-    };
-
-    struct Channel {
-        bool enabled;
-        int lengthCounter;
-        int envelopeVolume;
-        int envelopeTimer;
-        int freqTimer;
-        int dutyPos;
-        int period;
-        Sweep sweep;
-    } ch1, ch2, ch3, ch4;
-
+    struct Sweep { int period; int timer; bool enabled; int shadowFreq; };
+    struct Channel { bool enabled; int lengthCounter; int envelopeVolume; int envelopeTimer; int freqTimer; int dutyPos; int period; Sweep sweep; } ch1, ch2, ch3, ch4;
     int frameSequencer;
     float accL; float accR; int accCount;
-
     const int CLOCK_RATE = 4194304;
     std::vector<int16_t> buffer;
-
-    const int dutyPatterns[4][8] = {
-        {0,0,0,0,0,0,0,1}, {1,0,0,0,0,0,0,1}, {1,0,0,0,0,1,1,1}, {0,1,1,1,1,1,1,0}
-    };
+    const int dutyPatterns[4][8] = { {0,0,0,0,0,0,0,1}, {1,0,0,0,0,0,0,1}, {1,0,0,0,0,1,1,1}, {0,1,1,1,1,1,1,0} };
     uint16_t lfsr;
 
     APU() { Reset(); }
-
     void Reset() {
-        memset(regs, 0, sizeof(regs));
-        memset(waveRam, 0, sizeof(waveRam));
-        buffer.clear();
-        frameSequencer = 0;
-        accL = 0; accR = 0; accCount = 0;
-
-        memset(&ch1, 0, sizeof(Channel));
-        memset(&ch2, 0, sizeof(Channel));
-        memset(&ch3, 0, sizeof(Channel));
-        memset(&ch4, 0, sizeof(Channel));
-
-        lfsr = 0x7FFF;
-        regs[0x26] = 0xF1;
+        memset(regs, 0, sizeof(regs)); memset(waveRam, 0, sizeof(waveRam)); buffer.clear();
+        frameSequencer = 0; accL = 0; accR = 0; accCount = 0;
+        memset(&ch1, 0, sizeof(Channel)); memset(&ch2, 0, sizeof(Channel));
+        memset(&ch3, 0, sizeof(Channel)); memset(&ch4, 0, sizeof(Channel));
+        lfsr = 0x7FFF; regs[0x26] = 0xF1;
     }
-
     Byte Read(Word addr) {
         if (addr >= 0xFF30 && addr <= 0xFF3F) return waveRam[addr - 0xFF30];
         if (addr >= 0xFF10 && addr <= 0xFF3F) {
-            int r = addr - 0xFF00;
-            Byte val = regs[r];
+            int r = addr - 0xFF00; Byte val = regs[r];
             if (addr == 0xFF26) {
                 val = (val & 0xF0);
-                if (ch1.enabled) val |= 0x01;
-                if (ch2.enabled) val |= 0x02;
-                if (ch3.enabled) val |= 0x04;
-                if (ch4.enabled) val |= 0x08;
+                if (ch1.enabled) val |= 0x01; if (ch2.enabled) val |= 0x02;
+                if (ch3.enabled) val |= 0x04; if (ch4.enabled) val |= 0x08;
             }
             return val;
         }
         return 0xFF;
     }
-
     void Write(Word addr, Byte value) {
         if (addr >= 0xFF30 && addr <= 0xFF3F) { waveRam[addr - 0xFF30] = value; return; }
         if (addr >= 0xFF10 && addr <= 0xFF3F) {
-            int r = addr - 0xFF00;
-            regs[r] = value;
+            int r = addr - 0xFF00; regs[r] = value;
             if (r == 0x14 && (value & 0x80)) TriggerCh1();
             if (r == 0x19 && (value & 0x80)) TriggerCh2();
             if (r == 0x1E && (value & 0x80)) TriggerCh3();
             if (r == 0x23 && (value & 0x80)) TriggerCh4();
-            if (r == 0x26) {
-                if (!(value & 0x80)) {
-                    Reset();
-                    regs[0x26] = 0x00;
-                }
-            }
+            if (r == 0x26) { if (!(value & 0x80)) { Reset(); regs[0x26] = 0x00; } }
         }
     }
-
     int CalcNewFreq() {
-        int shift = regs[0x10] & 0x07;
-        int diff = ch1.sweep.shadowFreq >> shift;
-        int newFreq = ch1.sweep.shadowFreq;
-        if (regs[0x10] & 0x08) newFreq -= diff;
-        else newFreq += diff;
+        int shift = regs[0x10] & 0x07; int diff = ch1.sweep.shadowFreq >> shift;
+        int newFreq = ch1.sweep.shadowFreq; if (regs[0x10] & 0x08) newFreq -= diff; else newFreq += diff;
         return newFreq;
     }
-
     void TriggerCh1() {
-        ch1.enabled = true;
-        int lenVal = regs[0x11] & 0x3F;
-        ch1.lengthCounter = lenVal ? (64 - lenVal) : 64;
-        ch1.envelopeVolume = (regs[0x12] >> 4);
-        ch1.envelopeTimer = (regs[0x12] & 0x07);
-        ch1.period = (2048 - ((regs[0x14] & 7) << 8 | regs[0x13])) * 4;
-        ch1.freqTimer = ch1.period;
-
-        int sweepPeriod = (regs[0x10] >> 4) & 0x07;
-        int sweepShift = regs[0x10] & 0x07;
-        ch1.sweep.period = sweepPeriod ? sweepPeriod : 8;
-        ch1.sweep.timer = ch1.sweep.period;
+        ch1.enabled = true; int lenVal = regs[0x11] & 0x3F; ch1.lengthCounter = lenVal ? (64 - lenVal) : 64;
+        ch1.envelopeVolume = (regs[0x12] >> 4); ch1.envelopeTimer = (regs[0x12] & 0x07);
+        ch1.period = (2048 - ((regs[0x14] & 7) << 8 | regs[0x13])) * 4; ch1.freqTimer = ch1.period;
+        int sweepPeriod = (regs[0x10] >> 4) & 0x07; int sweepShift = regs[0x10] & 0x07;
+        ch1.sweep.period = sweepPeriod ? sweepPeriod : 8; ch1.sweep.timer = ch1.sweep.period;
         ch1.sweep.shadowFreq = ((regs[0x14] & 7) << 8 | regs[0x13]);
         ch1.sweep.enabled = (sweepPeriod > 0 || sweepShift > 0);
-        if (sweepShift > 0) {
-            if (CalcNewFreq() > 2047) ch1.enabled = false;
-        }
+        if (sweepShift > 0) { if (CalcNewFreq() > 2047) ch1.enabled = false; }
     }
-
     void TriggerCh2() {
-        ch2.enabled = true;
-        int lenVal = regs[0x16] & 0x3F;
-        ch2.lengthCounter = lenVal ? (64 - lenVal) : 64;
-        ch2.envelopeVolume = (regs[0x17] >> 4);
-        ch2.envelopeTimer = (regs[0x17] & 0x07);
-        ch2.period = (2048 - ((regs[0x19] & 7) << 8 | regs[0x18])) * 4;
-        ch2.freqTimer = ch2.period;
+        ch2.enabled = true; int lenVal = regs[0x16] & 0x3F; ch2.lengthCounter = lenVal ? (64 - lenVal) : 64;
+        ch2.envelopeVolume = (regs[0x17] >> 4); ch2.envelopeTimer = (regs[0x17] & 0x07);
+        ch2.period = (2048 - ((regs[0x19] & 7) << 8 | regs[0x18])) * 4; ch2.freqTimer = ch2.period;
     }
-
     void TriggerCh3() {
-        ch3.enabled = true;
-        int lenVal = regs[0x1B];
-        ch3.lengthCounter = (256 - lenVal);
-        ch3.period = (2048 - ((regs[0x1E] & 7) << 8 | regs[0x1D])) * 2;
-        ch3.freqTimer = ch3.period;
-        ch3.dutyPos = 0;
+        ch3.enabled = true; int lenVal = regs[0x1B]; ch3.lengthCounter = (256 - lenVal);
+        ch3.period = (2048 - ((regs[0x1E] & 7) << 8 | regs[0x1D])) * 2; ch3.freqTimer = ch3.period; ch3.dutyPos = 0;
     }
-
     void TriggerCh4() {
-        ch4.enabled = true;
-        int lenVal = regs[0x20] & 0x3F;
-        ch4.lengthCounter = lenVal ? (64 - lenVal) : 64;
-        ch4.envelopeVolume = (regs[0x21] >> 4);
-        ch4.envelopeTimer = (regs[0x21] & 0x07);
-        lfsr = 0x7FFF;
+        ch4.enabled = true; int lenVal = regs[0x20] & 0x3F; ch4.lengthCounter = lenVal ? (64 - lenVal) : 64;
+        ch4.envelopeVolume = (regs[0x21] >> 4); ch4.envelopeTimer = (regs[0x21] & 0x07); lfsr = 0x7FFF;
     }
-
     void Step(int cycles) {
         frameSequencer += cycles;
         if (frameSequencer >= 8192) {
-            frameSequencer -= 8192;
-            static int step = 0;
-            step = (step + 1) & 7;
-
+            frameSequencer -= 8192; static int step = 0; step = (step + 1) & 7;
             if (!(step & 1)) {
                 if ((regs[0x14] & 0x40) && ch1.lengthCounter > 0 && --ch1.lengthCounter == 0) ch1.enabled = false;
                 if ((regs[0x19] & 0x40) && ch2.lengthCounter > 0 && --ch2.lengthCounter == 0) ch2.enabled = false;
                 if ((regs[0x1E] & 0x40) && ch3.lengthCounter > 0 && --ch3.lengthCounter == 0) ch3.enabled = false;
                 if ((regs[0x23] & 0x40) && ch4.lengthCounter > 0 && --ch4.lengthCounter == 0) ch4.enabled = false;
             }
-
             if (step == 2 || step == 6) {
                 if (ch1.sweep.enabled && ch1.enabled) {
                     if (--ch1.sweep.timer <= 0) {
-                        int period = (regs[0x10] >> 4) & 0x07;
-                        ch1.sweep.timer = period ? period : 8;
+                        int period = (regs[0x10] >> 4) & 0x07; ch1.sweep.timer = period ? period : 8;
                         if (period > 0) {
                             int newFreq = CalcNewFreq();
                             if (newFreq <= 2047 && (regs[0x10] & 0x07) > 0) {
-                                ch1.sweep.shadowFreq = newFreq;
-                                regs[0x13] = newFreq & 0xFF;
-                                regs[0x14] = (regs[0x14] & 0xF8) | ((newFreq >> 8) & 0x07);
-                                ch1.period = (2048 - newFreq) * 4;
-                                if (CalcNewFreq() > 2047) ch1.enabled = false;
+                                ch1.sweep.shadowFreq = newFreq; regs[0x13] = newFreq & 0xFF; regs[0x14] = (regs[0x14] & 0xF8) | ((newFreq >> 8) & 0x07);
+                                ch1.period = (2048 - newFreq) * 4; if (CalcNewFreq() > 2047) ch1.enabled = false;
                             }
-                            else if (newFreq > 2047) {
-                                ch1.enabled = false;
-                            }
+                            else if (newFreq > 2047) ch1.enabled = false;
                         }
                     }
                 }
             }
-
             if (step == 7) {
                 auto DoEnv = [&](Channel& ch, Byte reg) {
                     if (ch.enabled && (reg & 7) && --ch.envelopeTimer <= 0) {
-                        ch.envelopeTimer = reg & 7;
-                        if (reg & 8) { if (ch.envelopeVolume < 15) ch.envelopeVolume++; }
+                        ch.envelopeTimer = reg & 7; if (reg & 8) { if (ch.envelopeVolume < 15) ch.envelopeVolume++; }
                         else { if (ch.envelopeVolume > 0) ch.envelopeVolume--; }
                     }
                     };
-                DoEnv(ch1, regs[0x12]);
-                DoEnv(ch2, regs[0x17]);
-                DoEnv(ch4, regs[0x21]);
+                DoEnv(ch1, regs[0x12]); DoEnv(ch2, regs[0x17]); DoEnv(ch4, regs[0x21]);
             }
         }
-
-        int s1 = 0;
-        if (ch1.enabled) {
-            ch1.freqTimer -= cycles;
-            if (ch1.freqTimer <= 0) {
-                ch1.freqTimer += (2048 - ((regs[0x14] & 7) << 8 | regs[0x13])) * 4;
-                ch1.dutyPos = (ch1.dutyPos + 1) & 7;
-            }
-            if (dutyPatterns[regs[0x11] >> 6][ch1.dutyPos]) s1 = ch1.envelopeVolume;
-        }
-
-        int s2 = 0;
-        if (ch2.enabled) {
-            ch2.freqTimer -= cycles;
-            if (ch2.freqTimer <= 0) {
-                ch2.freqTimer += (2048 - ((regs[0x19] & 7) << 8 | regs[0x18])) * 4;
-                ch2.dutyPos = (ch2.dutyPos + 1) & 7;
-            }
-            if (dutyPatterns[regs[0x16] >> 6][ch2.dutyPos]) s2 = ch2.envelopeVolume;
-        }
-
-        int s3 = 0;
-        if (ch3.enabled && (regs[0x1A] & 0x80)) {
-            ch3.freqTimer -= cycles;
-            if (ch3.freqTimer <= 0) {
-                ch3.freqTimer += (2048 - ((regs[0x1E] & 7) << 8 | regs[0x1D])) * 2;
-                ch3.dutyPos = (ch3.dutyPos + 1) & 31;
-            }
-            Byte b = waveRam[ch3.dutyPos / 2];
-            int s = (ch3.dutyPos % 2 == 0) ? (b >> 4) : (b & 0xF);
-            int vCode = (regs[0x1C] >> 5) & 3;
-            if (vCode == 0) s3 = 0;
-            else if (vCode == 1) s3 = s;
-            else if (vCode == 2) s3 = s >> 1;
-            else if (vCode == 3) s3 = s >> 2;
-        }
-
-        int s4 = 0;
-        if (ch4.enabled) {
-            int divCode = regs[0x22] & 7;
-            int shift = (regs[0x22] >> 4) & 0xF;
-            int timerPeriod = (divCode ? (divCode << 4) : 8) << shift;
-
-            static int c4 = 0; c4 += cycles;
-            while (c4 >= timerPeriod) {
-                c4 -= timerPeriod;
-                int xorBit = (lfsr & 1) ^ ((lfsr >> 1) & 1);
-                lfsr >>= 1;
-                lfsr |= (xorBit << 14);
-                if (regs[0x22] & 8) {
-                    lfsr &= ~(1 << 6);
-                    lfsr |= (xorBit << 6);
-                }
-            }
-            if (!(lfsr & 1)) s4 = ch4.envelopeVolume;
-        }
-
-        int l = 0, r = 0;
-        Byte nr51 = regs[0x25];
-        if (nr51 & 0x01) r += s1; if (nr51 & 0x10) l += s1;
-        if (nr51 & 0x02) r += s2; if (nr51 & 0x20) l += s2;
-        if (nr51 & 0x04) r += s3; if (nr51 & 0x40) l += s3;
-        if (nr51 & 0x08) r += s4; if (nr51 & 0x80) l += s4;
-
-        Byte nr50 = regs[0x24];
-        int volL = (nr50 >> 4) & 7;
-        int volR = nr50 & 7;
-        l = l * (volL + 1);
-        r = r * (volR + 1);
-
-        accL += l * cycles;
-        accR += r * cycles;
-        accCount += cycles;
-
+        int s1 = 0; if (ch1.enabled) { ch1.freqTimer -= cycles; if (ch1.freqTimer <= 0) { ch1.freqTimer += (2048 - ((regs[0x14] & 7) << 8 | regs[0x13])) * 4; ch1.dutyPos = (ch1.dutyPos + 1) & 7; } if (dutyPatterns[regs[0x11] >> 6][ch1.dutyPos]) s1 = ch1.envelopeVolume; }
+        int s2 = 0; if (ch2.enabled) { ch2.freqTimer -= cycles; if (ch2.freqTimer <= 0) { ch2.freqTimer += (2048 - ((regs[0x19] & 7) << 8 | regs[0x18])) * 4; ch2.dutyPos = (ch2.dutyPos + 1) & 7; } if (dutyPatterns[regs[0x16] >> 6][ch2.dutyPos]) s2 = ch2.envelopeVolume; }
+        int s3 = 0; if (ch3.enabled && (regs[0x1A] & 0x80)) { ch3.freqTimer -= cycles; if (ch3.freqTimer <= 0) { ch3.freqTimer += (2048 - ((regs[0x1E] & 7) << 8 | regs[0x1D])) * 2; ch3.dutyPos = (ch3.dutyPos + 1) & 31; } Byte b = waveRam[ch3.dutyPos / 2]; int s = (ch3.dutyPos % 2 == 0) ? (b >> 4) : (b & 0xF); int vCode = (regs[0x1C] >> 5) & 3; if (vCode == 0) s3 = 0; else if (vCode == 1) s3 = s; else if (vCode == 2) s3 = s >> 1; else if (vCode == 3) s3 = s >> 2; }
+        int s4 = 0; if (ch4.enabled) { int divCode = regs[0x22] & 7; int shift = (regs[0x22] >> 4) & 0xF; int timerPeriod = (divCode ? (divCode << 4) : 8) << shift; static int c4 = 0; c4 += cycles; while (c4 >= timerPeriod) { c4 -= timerPeriod; int xorBit = (lfsr & 1) ^ ((lfsr >> 1) & 1); lfsr >>= 1; lfsr |= (xorBit << 14); if (regs[0x22] & 8) { lfsr &= ~(1 << 6); lfsr |= (xorBit << 6); } } if (!(lfsr & 1)) s4 = ch4.envelopeVolume; }
+        int l = 0, r = 0; Byte nr51 = regs[0x25];
+        if (nr51 & 0x01) r += s1; if (nr51 & 0x10) l += s1; if (nr51 & 0x02) r += s2; if (nr51 & 0x20) l += s2;
+        if (nr51 & 0x04) r += s3; if (nr51 & 0x40) l += s3; if (nr51 & 0x08) r += s4; if (nr51 & 0x80) l += s4;
+        Byte nr50 = regs[0x24]; int volL = (nr50 >> 4) & 7; int volR = nr50 & 7; l = l * (volL + 1); r = r * (volR + 1);
+        accL += l * cycles; accR += r * cycles; accCount += cycles;
         const int CYCLES_PER_SAMPLE = CLOCK_RATE / SAMPLE_RATE;
-        while (accCount >= CYCLES_PER_SAMPLE) {
-            int16_t outL = (int16_t)((accL / CYCLES_PER_SAMPLE) * 64);
-            int16_t outR = (int16_t)((accR / CYCLES_PER_SAMPLE) * 64);
-
-            buffer.push_back(outL);
-            buffer.push_back(outR);
-
-            accL -= (int)(accL / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE;
-            accR -= (int)(accR / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE;
-            accCount -= CYCLES_PER_SAMPLE;
-        }
+        while (accCount >= CYCLES_PER_SAMPLE) { buffer.push_back((int16_t)((accL / CYCLES_PER_SAMPLE) * 64)); buffer.push_back((int16_t)((accR / CYCLES_PER_SAMPLE) * 64)); accL -= (int)(accL / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE; accR -= (int)(accR / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE; accCount -= CYCLES_PER_SAMPLE; }
     }
 };
 
 // -----------------------------------------------------------------------------
-// MMU (MBC5 Support Added)
+// MMU
 // -----------------------------------------------------------------------------
 class MMU
 {
@@ -459,78 +298,47 @@ public:
     APU* apu;
 
     MMU() : apu(nullptr) { Reset(); }
-
     void SetAPU(APU* p) { apu = p; }
 
     void Reset() {
-        vram.assign(0x2000, 0); wram.assign(0x2000, 0); hram.assign(0x80, 0); io.assign(0x80, 0); oam.assign(0xA0, 0); sram.assign(0x20000, 0); // SRAM size increased for MBC5
+        vram.assign(0x2000, 0); wram.assign(0x2000, 0); hram.assign(0x80, 0); io.assign(0x80, 0); oam.assign(0xA0, 0); sram.assign(0x20000, 0);
         if (rom.size() < 0x8000) rom.resize(0x8000, 0);
         interruptFlag = 0; interruptEnable = 0; mbcType = 0; ramEnable = false; romBank = 1; ramBank = 0; bankingMode = 0;
         divCounter = 0; tacCounter = 0; rtcMapped = false; rtcS = rtcM = rtcH = rtcDL = rtcDH = rtcLatch = 0; lastTime = time(NULL);
-        joypadButtons = 0x0F; joypadDir = 0x0F;
-        hasBattery = false;
+        joypadButtons = 0x0F; joypadDir = 0x0F; hasBattery = false;
     }
 
     void LoadRomData(const std::vector<Byte>& data) {
         rom = data;
         if (rom.size() < 0x8000) rom.resize(0x8000, 0);
-
-        // MBC5 may support up to 128KB SRAM, resize safely
         if (sram.size() < 0x20000) sram.resize(0x20000, 0);
         std::fill(sram.begin(), sram.end(), 0);
 
         Byte type = rom[0x0147];
-        if (type == 0x05 || type == 0x06) mbcType = 2; // MBC2
-        else if (type >= 0x0F && type <= 0x13) mbcType = 3; // MBC3
-        else if (type >= 0x01 && type <= 0x03) mbcType = 1; // MBC1
-        else if (type >= 0x19 && type <= 0x1E) mbcType = 5; // ★修正: MBC5対応
+        if (type == 0x05 || type == 0x06) mbcType = 2;
+        else if (type >= 0x0F && type <= 0x13) mbcType = 3;
+        else if (type >= 0x01 && type <= 0x03) mbcType = 1;
+        else if (type >= 0x19 && type <= 0x1E) mbcType = 5;
         else mbcType = 0;
 
-        if (type == 0x03 || type == 0x06 || type == 0x09 || type == 0x0F ||
-            type == 0x10 || type == 0x13 || type == 0x1B || type == 0x1E || type == 0xFF) {
-            hasBattery = true;
-        }
-        else {
-            hasBattery = false;
-        }
-
+        hasBattery = (type == 0x03 || type == 0x06 || type == 0x09 || type == 0x0F || type == 0x10 || type == 0x13 || type == 0x1B || type == 0x1E || type == 0xFF);
         ramEnable = false; romBank = 1; ramBank = 0; bankingMode = 0; rtcMapped = false;
     }
 
     void LoadRAM(const std::wstring& path) {
         if (!hasBattery) return;
-        FILE* fp = NULL;
-        _wfopen_s(&fp, path.c_str(), L"rb");
-        if (fp) {
-            fseek(fp, 0, SEEK_END);
-            long size = ftell(fp);
-            fseek(fp, 0, SEEK_SET);
-
-            if (size > 0) {
-                if (size > (long)sram.size()) sram.resize(size);
-                fread(sram.data(), 1, size, fp);
-            }
-            fclose(fp);
-        }
+        FILE* fp = NULL; _wfopen_s(&fp, path.c_str(), L"rb");
+        if (fp) { fseek(fp, 0, SEEK_END); long size = ftell(fp); fseek(fp, 0, SEEK_SET); if (size > 0) { if (size > (long)sram.size()) sram.resize(size); fread(sram.data(), 1, size, fp); } fclose(fp); }
     }
-
     void SaveRAM(const std::wstring& path) {
         if (!hasBattery) return;
-        FILE* fp = NULL;
-        _wfopen_s(&fp, path.c_str(), L"wb");
-        if (fp) {
-            fwrite(sram.data(), 1, sram.size(), fp);
-            fclose(fp);
-        }
+        FILE* fp = NULL; _wfopen_s(&fp, path.c_str(), L"wb"); if (fp) { fwrite(sram.data(), 1, sram.size(), fp); fclose(fp); }
     }
 
     void RequestInterrupt(int bit) { interruptFlag |= (1 << bit); }
 
     void DoDMA(Byte value) {
-        Word srcBase = value << 8;
-        for (int i = 0; i < 0xA0; i++) {
-            oam[i] = Read(srcBase + i);
-        }
+        Word srcBase = value << 8; for (int i = 0; i < 0xA0; i++) oam[i] = Read(srcBase + i);
     }
 
     void UpdateRTC() {
@@ -539,49 +347,34 @@ public:
         if (now > lastTime) {
             lastTime = now;
             if (!(rtcDH & 0x40)) {
-                rtcS++;
-                if (rtcS >= 60) { rtcS = 0; rtcM++; }
-                if (rtcM >= 60) { rtcM = 0; rtcH++; }
-                if (rtcH >= 24) { rtcH = 0; rtcDL++; if (rtcDL == 0) rtcDH |= 1; }
+                rtcS++; if (rtcS >= 60) { rtcS = 0; rtcM++; } if (rtcM >= 60) { rtcM = 0; rtcH++; } if (rtcH >= 24) { rtcH = 0; rtcDL++; if (rtcDL == 0) rtcDH |= 1; }
             }
         }
     }
-
     void UpdateTimers(int cycles) {
-        divCounter += cycles;
-        while (divCounter >= 256) {
-            io[0x04]++;
-            divCounter -= 256;
-        }
-
+        divCounter += cycles; while (divCounter >= 256) { io[0x04]++; divCounter -= 256; }
         Byte tac = io[0x07];
         if (tac & 0x04) {
-            tacCounter += cycles;
-            int threshold = 1024;
-            switch (tac & 0x03) {
-            case 0: threshold = 1024; break;
-            case 1: threshold = 16; break;
-            case 2: threshold = 64; break;
-            case 3: threshold = 256; break;
-            }
-
-            while (tacCounter >= threshold) {
-                tacCounter -= threshold;
-                Byte tima = io[0x05];
-                if (tima == 0xFF) {
-                    io[0x05] = io[0x06];
-                    RequestInterrupt(2);
-                }
-                else {
-                    io[0x05]++;
-                }
-            }
+            tacCounter += cycles; int threshold = 1024;
+            switch (tac & 0x03) { case 0: threshold = 1024; break; case 1: threshold = 16; break; case 2: threshold = 64; break; case 3: threshold = 256; break; }
+                                        while (tacCounter >= threshold) { tacCounter -= threshold; Byte tima = io[0x05]; if (tima == 0xFF) { io[0x05] = io[0x06]; RequestInterrupt(2); } else { io[0x05]++; } }
         }
+    }
+
+    void CheckJoypadInterrupt() {
+        Byte select = io[0x00];
+        bool req = false;
+        if (!(select & 0x10)) { // Directions selected
+            if ((joypadDir & 0x0F) != 0x0F) req = true;
+        }
+        if (!(select & 0x20)) { // Buttons selected
+            if ((joypadButtons & 0x0F) != 0x0F) req = true;
+        }
+        if (req) RequestInterrupt(4);
     }
 
     Byte GetJoypadState() {
-        Byte select = io[0x00];
-        Byte result = 0xCF | select;
+        Byte select = io[0x00]; Byte result = 0xCF | select;
         if (!(select & 0x10)) result &= (0xF0 | joypadDir);
         if (!(select & 0x20)) result &= (0xF0 | joypadButtons);
         return result;
@@ -592,31 +385,19 @@ public:
         if (addr < 0x8000) {
             int bank = romBank;
             if (mbcType == 1 && bankingMode == 0) bank |= (ramBank << 5);
-            // MBC5 uses full 9-bit romBank, no special mode needed here
-            int maxBanks = (int)(rom.size() / 0x4000);
-            if (maxBanks == 0) maxBanks = 1;
-            bank %= maxBanks;
+            int maxBanks = (int)(rom.size() / 0x4000); if (maxBanks == 0) maxBanks = 1; bank %= maxBanks;
             return rom[(bank * 0x4000) + (addr - 0x4000)];
         }
         if (addr < 0xA000) return vram[addr - 0x8000];
         if (addr < 0xC000) {
             if (!ramEnable) return 0xFF;
             if (mbcType == 3 && rtcMapped) {
-                switch (ramBank) {
-                case 0x08: return rtcS; case 0x09: return rtcM; case 0x0A: return rtcH;
-                case 0x0B: return rtcDL; case 0x0C: return rtcDH; default: return 0xFF;
-                }
+            switch (ramBank) { case 0x08: return rtcS; case 0x09: return rtcM; case 0x0A: return rtcH; case 0x0B: return rtcDL; case 0x0C: return rtcDH; default: return 0xFF; }
             }
-            else if (mbcType == 2) {
-                if (addr < 0xA200) return (sram[addr - 0xA000] & 0x0F);
-                return 0xFF;
-            }
+            else if (mbcType == 2) { if (addr < 0xA200) return (sram[addr - 0xA000] & 0x0F); return 0xFF; }
             else {
-                // ★修正: MBC5の場合もここを通る
                 int bank = (mbcType == 3 || mbcType == 5) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
-                int idx = (bank * 0x2000) + (addr - 0xA000);
-                if (idx < sram.size()) return sram[idx];
-                return 0xFF;
+                int idx = (bank * 0x2000) + (addr - 0xA000); if (idx < sram.size()) return sram[idx]; return 0xFF;
             }
         }
         if (addr < 0xE000) return wram[addr - 0xC000];
@@ -625,12 +406,7 @@ public:
         if (addr < 0xFF00) return 0xFF;
         if (addr == 0xFF00) return GetJoypadState();
         if (addr == 0xFF0F) return interruptFlag;
-
-        if (addr >= 0xFF10 && addr <= 0xFF3F) {
-            if (apu) return apu->Read(addr);
-            return 0xFF;
-        }
-
+        if (addr >= 0xFF10 && addr <= 0xFF3F) { if (apu) return apu->Read(addr); return 0xFF; }
         if (addr < 0xFF80) return io[addr - 0xFF00];
         if (addr < 0xFFFF) return hram[addr - 0xFF80];
         if (addr == 0xFFFF) return interruptEnable;
@@ -646,34 +422,15 @@ public:
                 else if (addr < 0x8000) bankingMode = value & 0x01;
             }
             else if (mbcType == 2) {
-                if (addr < 0x4000) {
-                    if (addr & 0x0100) { romBank = value & 0x0F; if (romBank == 0) romBank = 1; }
-                    else ramEnable = ((value & 0x0F) == 0x0A);
-                }
+                if (addr < 0x4000) { if (addr & 0x0100) { romBank = value & 0x0F; if (romBank == 0) romBank = 1; } else ramEnable = ((value & 0x0F) == 0x0A); }
             }
             else if (mbcType == 3) {
-                if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A);
-                else if (addr < 0x4000) { romBank = value & 0x7F; if (romBank == 0) romBank = 1; }
+                if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A); else if (addr < 0x4000) { romBank = value & 0x7F; if (romBank == 0) romBank = 1; }
                 else if (addr < 0x6000) { ramBank = value; rtcMapped = (value >= 0x08 && value <= 0x0C); }
                 else if (addr < 0x8000) rtcLatch = value;
             }
-            // ★修正: MBC5の書き込み処理
             else if (mbcType == 5) {
-                if (addr < 0x2000) {
-                    ramEnable = ((value & 0x0F) == 0x0A);
-                }
-                else if (addr < 0x3000) {
-                    // ROM Bank Low 8bit
-                    romBank = (romBank & 0x100) | value;
-                }
-                else if (addr < 0x4000) {
-                    // ROM Bank High 1bit (bit 9)
-                    romBank = (romBank & 0x0FF) | ((value & 0x01) << 8);
-                }
-                else if (addr < 0x6000) {
-                    // RAM Bank (0x00-0x0F)
-                    ramBank = value & 0x0F;
-                }
+                if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A); else if (addr < 0x3000) romBank = (romBank & 0x100) | value; else if (addr < 0x4000) romBank = (romBank & 0x0FF) | ((value & 0x01) << 8); else if (addr < 0x6000) ramBank = value & 0x0F;
             }
             return;
         }
@@ -683,10 +440,7 @@ public:
                 if (mbcType == 3 && rtcMapped) { /* RTC Write */ }
                 else if (mbcType == 2) { if (addr < 0xA200) sram[addr - 0xA000] = value & 0x0F; }
                 else {
-                    // ★修正: MBC5対応 (RAM書き込み)
-                    int bank = (mbcType == 3 || mbcType == 5) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
-                    int idx = (bank * 0x2000) + (addr - 0xA000);
-                    if (idx < sram.size()) sram[idx] = value;
+                    int bank = (mbcType == 3 || mbcType == 5) ? ramBank : ((bankingMode == 1) ? ramBank : 0); int idx = (bank * 0x2000) + (addr - 0xA000); if (idx < sram.size()) sram[idx] = value;
                 }
             }
             return;
@@ -695,15 +449,15 @@ public:
         if (addr < 0xFE00) { wram[addr - 0xE000] = value; return; }
         if (addr < 0xFEA0) { oam[addr - 0xFE00] = value; return; }
         if (addr < 0xFF00) return;
-        if (addr == 0xFF00) { io[0x00] = value; return; }
+
+        if (addr == 0xFF00) { io[0x00] = value; CheckJoypadInterrupt(); return; }
         if (addr == 0xFF04) { io[0x04] = 0; divCounter = 0; return; }
         if (addr == 0xFF0F) { interruptFlag = value; return; }
         if (addr == 0xFF46) { DoDMA(value); return; }
+        if (addr == 0xFF41) { io[0x41] = (value & 0xF8) | (io[0x41] & 0x07); return; }
+        if (addr == 0xFF44) { io[0x44] = 0; return; }
 
-        if (addr >= 0xFF10 && addr <= 0xFF3F) {
-            if (apu) apu->Write(addr, value);
-        }
-
+        if (addr >= 0xFF10 && addr <= 0xFF3F) { if (apu) apu->Write(addr, value); return; }
         if (addr < 0xFF80) { io[addr - 0xFF00] = value; return; }
         if (addr < 0xFFFF) { hram[addr - 0xFF80] = value; return; }
         if (addr == 0xFFFF) { interruptEnable = value; return; }
@@ -712,37 +466,38 @@ public:
     void SetKey(int keyId, bool pressed) {
         Byte* target = (keyId < 4) ? &joypadDir : &joypadButtons;
         int bit = keyId % 4;
+        Byte oldVal = *target;
         if (pressed) *target &= ~(1 << bit); else *target |= (1 << bit);
+
+        if (pressed && (oldVal & (1 << bit))) {
+            CheckJoypadInterrupt();
+        }
     }
+
     std::string GetTitle() {
         if (rom.size() < 0x143) return "";
         char buf[17] = { 0 }; for (int i = 0; i < 16; i++) { char c = rom[0x0134 + i]; if (c == 0) break; buf[i] = c; }
         return std::string(buf);
     }
     std::string GetMBCName() {
-        if (mbcType == 1) return "MBC1";
-        if (mbcType == 2) return "MBC2";
-        if (mbcType == 3) return "MBC3";
-        if (mbcType == 5) return "MBC5"; // ★修正: 文字列追加
-        return "ROM ONLY";
+        if (mbcType == 1) return "MBC1"; if (mbcType == 2) return "MBC2"; if (mbcType == 3) return "MBC3"; if (mbcType == 5) return "MBC5"; return "ROM ONLY";
     }
 };
 
 // -----------------------------------------------------------------------------
 // PPU
 // -----------------------------------------------------------------------------
-class PPU
-{
+class PPU {
 private:
-    MMU* mmu;
-    uint32_t* screenBuffer;
-    int cycleCounter;
-    int mode;
+    MMU* mmu; uint32_t* screenBuffer; int cycleCounter; int mode; int windowLine; bool statIntSignal;
+    Byte latchSCX, latchSCY, latchBGP, latchOBP0, latchOBP1, latchLCDC, latchWY; int latchWX;
     const uint32_t PALETTE[4] = { 0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820 };
-
 public:
-    PPU(MMU* m) : mmu(m), screenBuffer(nullptr), cycleCounter(0), mode(2) {}
-    void Reset() { cycleCounter = 0; mode = 2; }
+    PPU(MMU* m) : mmu(m), screenBuffer(nullptr), cycleCounter(0), mode(2), windowLine(0), statIntSignal(false) {}
+    void Reset() {
+        cycleCounter = 0; mode = 2; windowLine = 0; statIntSignal = false;
+        if (mmu) mmu->io[0x41] = (mmu->io[0x41] & 0xFC) | 2;
+    }
     void SetScreenBuffer(uint32_t* buffer) { screenBuffer = buffer; }
     Byte GetLY() { return mmu->io[0x44]; }
     void SetLY(Byte v) { mmu->io[0x44] = v; }
@@ -754,148 +509,95 @@ public:
     void Step(int cycles) {
         Byte lcdc = GetLCDC();
         if (!(lcdc & 0x80)) {
-            SetLY(0); cycleCounter = 0; mode = 0;
-            Byte stat = GetSTAT() & 0xFC; SetSTAT(stat);
-            return;
+            SetLY(0); cycleCounter = 0; mode = 2; windowLine = 0; statIntSignal = false;
+            SetSTAT(GetSTAT() & 0xFC); return;
         }
 
-        cycleCounter += cycles;
-        Byte ly = GetLY();
-        Byte stat = GetSTAT();
-        int reqInt = 0;
+        cycleCounter += cycles; Byte ly = GetLY(); Byte stat = GetSTAT();
+        bool lycMatch = (ly == GetLYC());
+        if (lycMatch) stat |= 0x04; else stat &= ~0x04;
 
         if (mode == 2) {
-            if (cycleCounter >= 80) { cycleCounter -= 80; mode = 3; }
+            if (cycleCounter >= 80) {
+                cycleCounter -= 80; mode = 3;
+                latchSCX = mmu->io[0x43]; latchSCY = mmu->io[0x42]; latchBGP = mmu->io[0x47];
+                latchOBP0 = mmu->io[0x48]; latchOBP1 = mmu->io[0x49]; latchLCDC = mmu->io[0x40];
+                latchWY = mmu->io[0x4A]; latchWX = (int)mmu->io[0x4B] - 7;
+            }
         }
         else if (mode == 3) {
-            if (cycleCounter >= 172) {
-                cycleCounter -= 172; mode = 0;
-                RenderScanline(ly);
-                if (stat & 0x08) reqInt = 1;
-            }
+            if (cycleCounter >= 172) { cycleCounter -= 172; mode = 0; RenderScanline(ly); }
         }
         else if (mode == 0) {
             if (cycleCounter >= 204) {
-                cycleCounter -= 204;
-                ly++; SetLY(ly);
-                if (ly == 144) {
-                    mode = 1; mmu->RequestInterrupt(0);
-                    if (stat & 0x10) reqInt = 1;
-                }
-                else {
-                    mode = 2;
-                    if (stat & 0x20) reqInt = 1;
-                }
-                if (ly == GetLYC()) { stat |= 0x04; if (stat & 0x40) reqInt = 1; }
-                else { stat &= ~0x04; }
+                cycleCounter -= 204; ly++; SetLY(ly);
+                if (ly == 144) { mode = 1; mmu->RequestInterrupt(0); windowLine = 0; }
+                else { mode = 2; }
             }
         }
         else if (mode == 1) {
             if (cycleCounter >= 456) {
                 cycleCounter -= 456; ly++;
-                if (ly > 153) { mode = 2; ly = 0; if (stat & 0x20) reqInt = 1; }
+                if (ly > 153) { mode = 2; ly = 0; windowLine = 0; }
                 SetLY(ly);
-                if (ly == GetLYC()) { stat |= 0x04; if (stat & 0x40) reqInt = 1; }
-                else { stat &= ~0x04; }
             }
         }
-        stat = (stat & 0xFC) | (mode & 0x03);
-        SetSTAT(stat);
-        if (reqInt) mmu->RequestInterrupt(1);
+        stat = (stat & 0xFC) | (mode & 0x03); SetSTAT(stat);
+
+        bool currentSignal = false;
+        if ((stat & 0x40) && lycMatch) currentSignal = true;
+        if ((stat & 0x20) && (mode == 2)) currentSignal = true;
+        if ((stat & 0x10) && (mode == 1)) currentSignal = true;
+        if ((stat & 0x08) && (mode == 0)) currentSignal = true;
+        if (currentSignal && !statIntSignal) mmu->RequestInterrupt(1);
+        statIntSignal = currentSignal;
     }
 
     void RenderScanline(int line) {
         if (!screenBuffer) return;
-        Byte lcdc = GetLCDC();
-        if (!(lcdc & 0x01)) return;
-
-        Byte scy = mmu->io[0x42];
-        Byte scx = mmu->io[0x43];
-        Byte bgp = mmu->io[0x47];
-        Byte wy = mmu->io[0x4A];
-        int wx = (int)mmu->io[0x4B] - 7;
-
-        uint32_t palette[4];
-        for (int i = 0; i < 4; i++) palette[i] = PALETTE[(bgp >> (i * 2)) & 3];
-
-        Word mapBase = (lcdc & 0x08) ? 0x9C00 : 0x9800;
-        Word tileBase = (lcdc & 0x10) ? 0x8000 : 0x9000;
-        bool unsignedTile = (lcdc & 0x10);
+        Byte lcdc = latchLCDC; if (!(lcdc & 0x01)) return;
+        Byte scy = latchSCY; Byte scx = latchSCX; Byte bgp = latchBGP; Byte wy = latchWY; int wx = latchWX;
+        uint32_t palette[4]; for (int i = 0; i < 4; i++) palette[i] = PALETTE[(bgp >> (i * 2)) & 3];
+        Word mapBase = (lcdc & 0x08) ? 0x9C00 : 0x9800; Word tileBase = (lcdc & 0x10) ? 0x8000 : 0x9000; bool unsignedTile = (lcdc & 0x10);
 
         Byte mapY = line + scy;
         for (int x = 0; x < 160; ++x) {
-            Byte mapX = x + scx;
-            Word tileIdxAddr = mapBase + (mapY / 8) * 32 + (mapX / 8);
-            Byte tileIdx = mmu->Read(tileIdxAddr);
+            Byte mapX = x + scx; Word tileIdxAddr = mapBase + (mapY / 8) * 32 + (mapX / 8); Byte tileIdx = mmu->Read(tileIdxAddr);
             Word tileAddr = unsignedTile ? tileBase + (tileIdx * 16) : tileBase + (static_cast<int8_t>(tileIdx) * 16);
-            Byte row = mapY % 8;
-            Byte b1 = mmu->Read(tileAddr + row * 2);
-            Byte b2 = mmu->Read(tileAddr + row * 2 + 1);
-            int bit = 7 - (mapX % 8);
-            int colorId = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
+            Byte row = mapY % 8; Byte b1 = mmu->Read(tileAddr + row * 2); Byte b2 = mmu->Read(tileAddr + row * 2 + 1);
+            int bit = 7 - (mapX % 8); int colorId = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
             screenBuffer[line * 160 + x] = palette[colorId];
         }
 
-        if ((lcdc & 0x20) && line >= wy) {
-            Word winMapBase = (lcdc & 0x40) ? 0x9C00 : 0x9800;
+        if ((lcdc & 0x20) && (line >= wy) && (wx <= 159)) {
+            Word winMapBase = (lcdc & 0x40) ? 0x9C00 : 0x9800; Byte winY = (Byte)windowLine;
             for (int x = 0; x < 160; ++x) {
                 if (x >= wx) {
-                    int winX = x - wx;
-                    int winY = line - wy;
-                    Word tileIdxAddr = winMapBase + (winY / 8) * 32 + (winX / 8);
-                    Byte tileIdx = mmu->Read(tileIdxAddr);
+                    int winX = x - wx; Word tileIdxAddr = winMapBase + (winY / 8) * 32 + (winX / 8); Byte tileIdx = mmu->Read(tileIdxAddr);
                     Word tileAddr = unsignedTile ? tileBase + (tileIdx * 16) : tileBase + (static_cast<int8_t>(tileIdx) * 16);
-                    Byte row = winY % 8;
-                    Byte b1 = mmu->Read(tileAddr + row * 2);
-                    Byte b2 = mmu->Read(tileAddr + row * 2 + 1);
-                    int bit = 7 - (winX % 8);
-                    int colorId = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
+                    Byte row = winY % 8; Byte b1 = mmu->Read(tileAddr + row * 2); Byte b2 = mmu->Read(tileAddr + row * 2 + 1);
+                    int bit = 7 - (winX % 8); int colorId = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
                     screenBuffer[line * 160 + x] = palette[colorId];
                 }
             }
+            windowLine++;
         }
 
         if (!(lcdc & 0x02)) return;
-
-        Byte obp0 = mmu->io[0x48];
-        Byte obp1 = mmu->io[0x49];
-        uint32_t palObj0[4], palObj1[4];
-        for (int i = 0; i < 4; i++) {
-            palObj0[i] = PALETTE[(obp0 >> (i * 2)) & 3];
-            palObj1[i] = PALETTE[(obp1 >> (i * 2)) & 3];
-        }
-
+        Byte obp0 = latchOBP0; Byte obp1 = latchOBP1; uint32_t palObj0[4], palObj1[4];
+        for (int i = 0; i < 4; i++) { palObj0[i] = PALETTE[(obp0 >> (i * 2)) & 3]; palObj1[i] = PALETTE[(obp1 >> (i * 2)) & 3]; }
         int height = (lcdc & 0x04) ? 16 : 8;
-
         for (int i = 0; i < 40; i++) {
-            Byte y = mmu->oam[i * 4];
-            Byte x = mmu->oam[i * 4 + 1];
-            Byte tile = mmu->oam[i * 4 + 2];
-            Byte attr = mmu->oam[i * 4 + 3];
-
-            int spriteY = line - (y - 16);
-            if (spriteY < 0 || spriteY >= height) continue;
-
-            if (attr & 0x40) spriteY = height - 1 - spriteY;
-            if (height == 16) tile &= 0xFE;
-
-            Word tileAddr = 0x8000 + (tile * 16) + (spriteY * 2);
-            Byte b1 = mmu->Read(tileAddr);
-            Byte b2 = mmu->Read(tileAddr + 1);
-
+            Byte y = mmu->oam[i * 4]; Byte x = mmu->oam[i * 4 + 1]; Byte tile = mmu->oam[i * 4 + 2]; Byte attr = mmu->oam[i * 4 + 3];
+            int spriteY = line - (y - 16); if (spriteY < 0 || spriteY >= height) continue;
+            if (attr & 0x40) spriteY = height - 1 - spriteY; if (height == 16) tile &= 0xFE;
+            Word tileAddr = 0x8000 + (tile * 16) + (spriteY * 2); Byte b1 = mmu->Read(tileAddr); Byte b2 = mmu->Read(tileAddr + 1);
             uint32_t* pal = (attr & 0x10) ? palObj1 : palObj0;
-
             for (int px = 0; px < 8; px++) {
-                int screenX = (x - 8) + px;
-                if (screenX < 0 || screenX >= 160) continue;
-
-                int bit = (attr & 0x20) ? px : (7 - px);
-                int colorId = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
-
-                if (colorId == 0) continue;
+                int screenX = (x - 8) + px; if (screenX < 0 || screenX >= 160) continue;
                 if ((attr & 0x80) && screenBuffer[line * 160 + screenX] != PALETTE[0]) continue;
-
-                screenBuffer[line * 160 + screenX] = pal[colorId];
+                int bit = (attr & 0x20) ? px : (7 - px); int colorId = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
+                if (colorId == 0) continue; screenBuffer[line * 160 + screenX] = pal[colorId];
             }
         }
     }
@@ -904,34 +606,22 @@ public:
 // -----------------------------------------------------------------------------
 // CPU
 // -----------------------------------------------------------------------------
-class CPU
-{
+class CPU {
 public:
     struct Registers {
         struct { union { struct { Byte f; Byte a; }; Word af; }; } af;
         struct { union { struct { Byte c; Byte b; }; Word bc; }; } bc;
         struct { union { struct { Byte e; Byte d; }; Word de; }; } de;
         struct { union { struct { Byte l; Byte h; }; Word hl; }; } hl;
-        Word sp, pc;
-        bool ime, imeScheduled;
+        Word sp, pc; bool ime; int imeDelay;
     } reg;
-    MMU* mmu;
-    bool halted, haltBugTriggered;
-    int currentCycles;
+    MMU* mmu; bool halted, haltBugTriggered; int currentCycles;
 
     CPU(MMU* m) : mmu(m) { Reset(); }
-    void Reset() {
-        reg.af.af = 0x01B0; reg.bc.bc = 0x0013; reg.de.de = 0x00D8; reg.hl.hl = 0x014D;
-        reg.sp = 0xFFFE; reg.pc = 0x0100; reg.ime = false; reg.imeScheduled = false;
-        halted = false; haltBugTriggered = false; currentCycles = 0;
-    }
+    void Reset() { reg.af.af = 0x01B0; reg.bc.bc = 0x0013; reg.de.de = 0x00D8; reg.hl.hl = 0x014D; reg.sp = 0xFFFE; reg.pc = 0x0100; reg.ime = false; reg.imeDelay = 0; halted = false; haltBugTriggered = false; currentCycles = 0; }
     Byte Read(Word addr) { currentCycles += 4; return mmu->Read(addr); }
     void Write(Word addr, Byte val) { currentCycles += 4; mmu->Write(addr, val); }
-    Byte Fetch() {
-        Byte val = Read(reg.pc);
-        if (haltBugTriggered) haltBugTriggered = false; else reg.pc++;
-        return val;
-    }
+    Byte Fetch() { Byte val = Read(reg.pc); if (haltBugTriggered) haltBugTriggered = false; else reg.pc++; return val; }
     Word Fetch16() { Byte l = Fetch(); Byte h = Fetch(); return (h << 8) | l; }
     void Push(Word val) { reg.sp--; Write(reg.sp, val >> 8); reg.sp--; Write(reg.sp, val & 0xFF); }
     Word Pop() { Byte l = Read(reg.sp++); Byte h = Read(reg.sp++); return (h << 8) | l; }
@@ -939,8 +629,7 @@ public:
     void F_N(bool n) { if (n) reg.af.f |= 0x40; else reg.af.f &= ~0x40; }
     void F_H(bool h) { if (h) reg.af.f |= 0x20; else reg.af.f &= ~0x20; }
     void F_C(bool c) { if (c) reg.af.f |= 0x10; else reg.af.f &= ~0x10; }
-    bool IsZ() const { return reg.af.f & 0x80; }
-    bool IsC() const { return reg.af.f & 0x10; }
+    bool IsZ() const { return reg.af.f & 0x80; } bool IsC() const { return reg.af.f & 0x10; }
     Byte GetR8(int idx) { switch (idx) { case 0: return reg.bc.b; case 1: return reg.bc.c; case 2: return reg.de.d; case 3: return reg.de.e; case 4: return reg.hl.h; case 5: return reg.hl.l; case 6: return Read(reg.hl.hl); case 7: return reg.af.a; } return 0; }
     void SetR8(int idx, Byte val) { switch (idx) { case 0: reg.bc.b = val; break; case 1: reg.bc.c = val; break; case 2: reg.de.d = val; break; case 3: reg.de.e = val; break; case 4: reg.hl.h = val; break; case 5: reg.hl.l = val; break; case 6: Write(reg.hl.hl, val); break; case 7: reg.af.a = val; break; } }
     Word GetR16(int idx, bool af = false) { switch (idx) { case 0: return reg.bc.bc; case 1: return reg.de.de; case 2: return reg.hl.hl; case 3: return af ? reg.af.af : reg.sp; } return 0; }
@@ -967,40 +656,32 @@ public:
                                                                            void ExecCB() {
                                                                                Byte op = Fetch(); Byte r = op & 0x07; Byte val = GetR8(r);
                                                                                if (op < 0x40) {
-    switch ((op >> 3) & 7) { case 0: RLC(val); break; case 1: RRC(val); break; case 2: RL(val); break; case 3: RR(val); break; case 4: SLA(val); break; case 5: SRA(val); break; case 6: SWAP(val); break; case 7: SRL(val); break; }
-                                   SetR8(r, val);
+    switch ((op >> 3) & 7) { case 0: RLC(val); break; case 1: RRC(val); break; case 2: RL(val); break; case 3: RR(val); break; case 4: SLA(val); break; case 5: SRA(val); break; case 6: SWAP(val); break; case 7: SRL(val); break; } SetR8(r, val);
                                                                                }
                                                                                else {
-                                                                                   int bit = (op >> 3) & 7;
-                                                                                   if (op < 0x80) BIT(bit, val); else if (op < 0xC0) { val &= ~(1 << bit); SetR8(r, val); }
+                                                                                   int bit = (op >> 3) & 7; if (op < 0x80) BIT(bit, val); else if (op < 0xC0) { val &= ~(1 << bit); SetR8(r, val); }
                                                                                    else { val |= (1 << bit); SetR8(r, val); }
                                                                                }
                                                                            }
                                                                            bool HandleInterrupts() {
                                                                                if (reg.ime && (mmu->interruptFlag & mmu->interruptEnable)) {
                                                                                    Byte fired = mmu->interruptFlag & mmu->interruptEnable;
-                                                                                   int bit = 0;
-                                                                                   if (fired & 0x01) bit = 0; else if (fired & 0x02) bit = 1; else if (fired & 0x04) bit = 2; else if (fired & 0x08) bit = 3; else if (fired & 0x10) bit = 4; else return false;
-                                                                                   reg.ime = false; mmu->interruptFlag &= ~(1 << bit);
-                                                                                   Push(reg.pc); reg.pc = 0x0040 + (bit * 8);
-                                                                                   currentCycles += 20; return true;
-                                                                               }
-                                                                               return false;
+                                                                                   int bit = 0; if (fired & 0x01) bit = 0; else if (fired & 0x02) bit = 1; else if (fired & 0x04) bit = 2; else if (fired & 0x08) bit = 3; else if (fired & 0x10) bit = 4; else return false;
+                                                                                   reg.ime = false; mmu->interruptFlag &= ~(1 << bit); Push(reg.pc); reg.pc = 0x0040 + (bit * 8); currentCycles += 20; return true;
+                                                                               } return false;
                                                                            }
                                                                            int Step() {
-                                                                               if (reg.imeScheduled) { reg.ime = true; reg.imeScheduled = false; }
+                                                                               if (reg.imeDelay > 0) { reg.imeDelay--; if (reg.imeDelay == 0) reg.ime = true; }
                                                                                if (HandleInterrupts()) return currentCycles;
                                                                                if (halted) {
                                                                                    currentCycles = 4;
                                                                                    if (mmu->interruptFlag & mmu->interruptEnable) { halted = false; if (!reg.ime) haltBugTriggered = true; }
                                                                                    return currentCycles;
                                                                                }
-                                                                               currentCycles = 0;
-                                                                               Byte op = Fetch();
+                                                                               currentCycles = 0; Byte op = Fetch();
                                                                                if ((op & 0xC0) == 0x40) { if (op == 0x76) halted = true; else SetR8((op >> 3) & 7, GetR8(op & 7)); }
                                                                                else if ((op & 0xC0) == 0x80) {
-                                                                                   Byte v = GetR8(op & 7);
-    switch ((op >> 3) & 7) { case 0: ALU_ADD(v); break; case 1: ALU_ADC(v); break; case 2: ALU_SUB(v); break; case 3: ALU_SBC(v); break; case 4: ALU_AND(v); break; case 5: ALU_XOR(v); break; case 6: ALU_OR(v); break; case 7: ALU_CP(v); break; }
+    Byte v = GetR8(op & 7); switch ((op >> 3) & 7) { case 0: ALU_ADD(v); break; case 1: ALU_ADC(v); break; case 2: ALU_SUB(v); break; case 3: ALU_SBC(v); break; case 4: ALU_AND(v); break; case 5: ALU_XOR(v); break; case 6: ALU_OR(v); break; case 7: ALU_CP(v); break; }
                                                                                }
                                                                                else {
                                                                                    switch (op) {
@@ -1026,13 +707,13 @@ public:
                                                                                    case 0xCC: { Word a = Fetch16(); if (IsZ()) Push(reg.pc), reg.pc = a; } break; case 0xCD: { Word a = Fetch16(); Push(reg.pc); reg.pc = a; } break; case 0xCE: ALU_ADC(Fetch()); break; case 0xCF: Push(reg.pc); reg.pc = 0x08; break;
                                                                                    case 0xD0: if (!IsC()) reg.pc = Pop(); else currentCycles -= 4; break; case 0xD1: SetR16(1, Pop()); break; case 0xD2: { Word a = Fetch16(); if (!IsC()) reg.pc = a; } break; case 0xD4: { Word a = Fetch16(); if (!IsC()) Push(reg.pc), reg.pc = a; } break;
                                                                                    case 0xD5: Push(reg.de.de); break; case 0xD6: ALU_SUB(Fetch()); break; case 0xD7: Push(reg.pc); reg.pc = 0x10; break; case 0xD8: if (IsC()) reg.pc = Pop(); else currentCycles -= 4; break;
-                                                                                   case 0xD9: reg.pc = Pop(); reg.ime = true; break; case 0xDA: { Word a = Fetch16(); if (IsC()) reg.pc = a; } break; case 0xDC: { Word a = Fetch16(); if (IsC()) Push(reg.pc), reg.pc = a; } break; case 0xDE: ALU_SBC(Fetch()); break; case 0xDF: Push(reg.pc); reg.pc = 0x18; break;
+                                                                                   case 0xD9: reg.pc = Pop(); reg.imeDelay = 2; break; case 0xDA: { Word a = Fetch16(); if (IsC()) reg.pc = a; } break; case 0xDC: { Word a = Fetch16(); if (IsC()) Push(reg.pc), reg.pc = a; } break; case 0xDE: ALU_SBC(Fetch()); break; case 0xDF: Push(reg.pc); reg.pc = 0x18; break;
                                                                                    case 0xE0: Write(0xFF00 | Fetch(), reg.af.a); break; case 0xE1: SetR16(2, Pop()); break; case 0xE2: Write(0xFF00 | reg.bc.c, reg.af.a); break; case 0xE5: Push(reg.hl.hl); break;
                                                                                    case 0xE6: ALU_AND(Fetch()); break; case 0xE7: Push(reg.pc); reg.pc = 0x20; break; case 0xE8: { SignedByte r = (SignedByte)Fetch(); Word sp = reg.sp; int res = sp + r; F_Z(0); F_N(0); F_H((sp & 0xF) + (r & 0xF) > 0xF); F_C((sp & 0xFF) + (r & 0xFF) > 0xFF); reg.sp = (Word)res; } break;
                                                                                    case 0xE9: reg.pc = reg.hl.hl; break; case 0xEA: Write(Fetch16(), reg.af.a); break; case 0xEE: ALU_XOR(Fetch()); break; case 0xEF: Push(reg.pc); reg.pc = 0x28; break;
                                                                                    case 0xF0: reg.af.a = Read(0xFF00 | Fetch()); break; case 0xF1: SetR16(3, Pop(), true); break; case 0xF2: reg.af.a = Read(0xFF00 | reg.bc.c); break; case 0xF3: reg.ime = false; break;
                                                                                    case 0xF5: Push(reg.af.af); break; case 0xF6: ALU_OR(Fetch()); break; case 0xF7: Push(reg.pc); reg.pc = 0x30; break; case 0xF8: { SignedByte r = (SignedByte)Fetch(); Word sp = reg.sp; int res = sp + r; F_Z(0); F_N(0); F_H((sp & 0xF) + (r & 0xF) > 0xF); F_C((sp & 0xFF) + (r & 0xFF) > 0xFF); reg.hl.hl = (Word)res; } break;
-                                                                                   case 0xF9: reg.sp = reg.hl.hl; break; case 0xFA: reg.af.a = Read(Fetch16()); break; case 0xFB: reg.imeScheduled = true; break; case 0xFE: ALU_CP(Fetch()); break; case 0xFF: Push(reg.pc); reg.pc = 0x38; break;
+                                                                                   case 0xF9: reg.sp = reg.hl.hl; break; case 0xFA: reg.af.a = Read(Fetch16()); break; case 0xFB: reg.imeDelay = 2; break; case 0xFE: ALU_CP(Fetch()); break; case 0xFF: Push(reg.pc); reg.pc = 0x38; break;
                                                                                    }
                                                                                }
                                                                                return currentCycles;

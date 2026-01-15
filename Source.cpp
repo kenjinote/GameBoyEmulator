@@ -423,7 +423,7 @@ public:
 };
 
 // -----------------------------------------------------------------------------
-// MMU
+// MMU (MBC5 Support Added)
 // -----------------------------------------------------------------------------
 class MMU
 {
@@ -441,7 +441,7 @@ public:
 
     int mbcType;
     bool ramEnable;
-    bool hasBattery; // ★追加: バッテリーバックアップ有無
+    bool hasBattery;
     int romBank;
     int ramBank;
     int bankingMode;
@@ -463,27 +463,29 @@ public:
     void SetAPU(APU* p) { apu = p; }
 
     void Reset() {
-        vram.assign(0x2000, 0); wram.assign(0x2000, 0); hram.assign(0x80, 0); io.assign(0x80, 0); oam.assign(0xA0, 0); sram.assign(0x10000, 0);
+        vram.assign(0x2000, 0); wram.assign(0x2000, 0); hram.assign(0x80, 0); io.assign(0x80, 0); oam.assign(0xA0, 0); sram.assign(0x20000, 0); // SRAM size increased for MBC5
         if (rom.size() < 0x8000) rom.resize(0x8000, 0);
         interruptFlag = 0; interruptEnable = 0; mbcType = 0; ramEnable = false; romBank = 1; ramBank = 0; bankingMode = 0;
         divCounter = 0; tacCounter = 0; rtcMapped = false; rtcS = rtcM = rtcH = rtcDL = rtcDH = rtcLatch = 0; lastTime = time(NULL);
         joypadButtons = 0x0F; joypadDir = 0x0F;
-        hasBattery = false; // ★追加
+        hasBattery = false;
     }
 
     void LoadRomData(const std::vector<Byte>& data) {
         rom = data;
         if (rom.size() < 0x8000) rom.resize(0x8000, 0);
+
+        // MBC5 may support up to 128KB SRAM, resize safely
+        if (sram.size() < 0x20000) sram.resize(0x20000, 0);
         std::fill(sram.begin(), sram.end(), 0);
 
         Byte type = rom[0x0147];
         if (type == 0x05 || type == 0x06) mbcType = 2; // MBC2
         else if (type >= 0x0F && type <= 0x13) mbcType = 3; // MBC3
         else if (type >= 0x01 && type <= 0x03) mbcType = 1; // MBC1
+        else if (type >= 0x19 && type <= 0x1E) mbcType = 5; // ★修正: MBC5対応
         else mbcType = 0;
 
-        // ★追加: バッテリー判定
-        // 03, 06, 09, 0F, 10, 13, 1B, 1E, FF 等がBatteryあり
         if (type == 0x03 || type == 0x06 || type == 0x09 || type == 0x0F ||
             type == 0x10 || type == 0x13 || type == 0x1B || type == 0x1E || type == 0xFF) {
             hasBattery = true;
@@ -495,32 +497,28 @@ public:
         ramEnable = false; romBank = 1; ramBank = 0; bankingMode = 0; rtcMapped = false;
     }
 
-    // ★追加: セーブデータの読み込み
     void LoadRAM(const std::wstring& path) {
         if (!hasBattery) return;
         FILE* fp = NULL;
         _wfopen_s(&fp, path.c_str(), L"rb");
         if (fp) {
-            // ファイルサイズ分だけ読み込む（sramサイズを超えない範囲で）
             fseek(fp, 0, SEEK_END);
             long size = ftell(fp);
             fseek(fp, 0, SEEK_SET);
 
             if (size > 0) {
-                if (size > (long)sram.size()) size = (long)sram.size();
+                if (size > (long)sram.size()) sram.resize(size);
                 fread(sram.data(), 1, size, fp);
             }
             fclose(fp);
         }
     }
 
-    // ★追加: セーブデータの書き込み
     void SaveRAM(const std::wstring& path) {
         if (!hasBattery) return;
         FILE* fp = NULL;
         _wfopen_s(&fp, path.c_str(), L"wb");
         if (fp) {
-            // SRAM全体をダンプ (本来はRAMサイズを見て切り詰めるのが望ましいが、簡易実装としてフルダンプ)
             fwrite(sram.data(), 1, sram.size(), fp);
             fclose(fp);
         }
@@ -594,6 +592,7 @@ public:
         if (addr < 0x8000) {
             int bank = romBank;
             if (mbcType == 1 && bankingMode == 0) bank |= (ramBank << 5);
+            // MBC5 uses full 9-bit romBank, no special mode needed here
             int maxBanks = (int)(rom.size() / 0x4000);
             if (maxBanks == 0) maxBanks = 1;
             bank %= maxBanks;
@@ -613,7 +612,8 @@ public:
                 return 0xFF;
             }
             else {
-                int bank = (mbcType == 3) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
+                // ★修正: MBC5の場合もここを通る
+                int bank = (mbcType == 3 || mbcType == 5) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
                 int idx = (bank * 0x2000) + (addr - 0xA000);
                 if (idx < sram.size()) return sram[idx];
                 return 0xFF;
@@ -657,6 +657,24 @@ public:
                 else if (addr < 0x6000) { ramBank = value; rtcMapped = (value >= 0x08 && value <= 0x0C); }
                 else if (addr < 0x8000) rtcLatch = value;
             }
+            // ★修正: MBC5の書き込み処理
+            else if (mbcType == 5) {
+                if (addr < 0x2000) {
+                    ramEnable = ((value & 0x0F) == 0x0A);
+                }
+                else if (addr < 0x3000) {
+                    // ROM Bank Low 8bit
+                    romBank = (romBank & 0x100) | value;
+                }
+                else if (addr < 0x4000) {
+                    // ROM Bank High 1bit (bit 9)
+                    romBank = (romBank & 0x0FF) | ((value & 0x01) << 8);
+                }
+                else if (addr < 0x6000) {
+                    // RAM Bank (0x00-0x0F)
+                    ramBank = value & 0x0F;
+                }
+            }
             return;
         }
         if (addr < 0xA000) { vram[addr - 0x8000] = value; return; }
@@ -665,7 +683,8 @@ public:
                 if (mbcType == 3 && rtcMapped) { /* RTC Write */ }
                 else if (mbcType == 2) { if (addr < 0xA200) sram[addr - 0xA000] = value & 0x0F; }
                 else {
-                    int bank = (mbcType == 3) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
+                    // ★修正: MBC5対応 (RAM書き込み)
+                    int bank = (mbcType == 3 || mbcType == 5) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
                     int idx = (bank * 0x2000) + (addr - 0xA000);
                     if (idx < sram.size()) sram[idx] = value;
                 }
@@ -701,7 +720,10 @@ public:
         return std::string(buf);
     }
     std::string GetMBCName() {
-        if (mbcType == 1) return "MBC1"; if (mbcType == 2) return "MBC2"; if (mbcType == 3) return "MBC3";
+        if (mbcType == 1) return "MBC1";
+        if (mbcType == 2) return "MBC2";
+        if (mbcType == 3) return "MBC3";
+        if (mbcType == 5) return "MBC5"; // ★修正: 文字列追加
         return "ROM ONLY";
     }
 };
@@ -1029,7 +1051,7 @@ public:
     APU apu;
     std::vector<uint32_t> displayBuffer;
     bool isRomLoaded;
-    std::wstring m_savePath; // ★追加: セーブファイルパス
+    std::wstring m_savePath;
 
     GameBoyCore() : cpu(&mmu), ppu(&mmu), isRomLoaded(false) {
         displayBuffer.resize(GB_WIDTH * GB_HEIGHT);
@@ -1077,7 +1099,6 @@ public:
             Reset(true);
             mmu.LoadRomData(buffer);
 
-            // ★追加: セーブデータのパスを作成して読み込む (拡張子を .sav に変更)
             m_savePath = path;
             size_t dotPos = m_savePath.find_last_of(L'.');
             if (dotPos != std::string::npos) {
@@ -1092,7 +1113,6 @@ public:
         return false;
     }
 
-    // ★追加: セーブ実行
     void SaveRAM() {
         if (isRomLoaded && !m_savePath.empty()) {
             mmu.SaveRAM(m_savePath);
@@ -1140,7 +1160,7 @@ private:
 public:
     App() : m_hwnd(NULL), m_pDirect2dFactory(NULL), m_pRenderTarget(NULL), m_pBitmap(NULL) {}
     ~App() {
-        m_gbCore.SaveRAM(); // ★追加: デストラクタでも一応保存
+        m_gbCore.SaveRAM();
         SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); SafeRelease(&m_pDirect2dFactory);
     }
 
@@ -1214,7 +1234,7 @@ private:
         PauseAudio();
 
         if (GetOpenFileName(&ofn) == TRUE) {
-            m_gbCore.SaveRAM(); // ★追加: 新しいROMを読む前に現在のセーブを保存
+            m_gbCore.SaveRAM();
 
             if (m_gbCore.LoadRom(szFile)) {
                 std::string titleStr = m_gbCore.GetTitle();
@@ -1290,14 +1310,13 @@ private:
             if (pApp) pApp->ResumeAudio();
             return 0;
 
-            // ★追加: アプリ終了時にセーブ
         case WM_CLOSE:
             if (pApp) pApp->m_gbCore.SaveRAM();
             DestroyWindow(hwnd);
             return 0;
 
         case WM_DESTROY:
-            if (pApp) pApp->m_gbCore.SaveRAM(); // 安全のためここでも呼ぶ
+            if (pApp) pApp->m_gbCore.SaveRAM();
             PostQuitMessage(0);
             return 0;
         }

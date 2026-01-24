@@ -1,6 +1,7 @@
 ﻿#define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <d2d1.h>
 #include <dsound.h>
 #include <vector>
@@ -11,6 +12,7 @@
 #include <ctime>
 #include <cmath>
 #include <algorithm>
+#pragma comment(lib, "shell32")
 #pragma comment(lib, "d2d1")
 #pragma comment(lib, "dsound")
 #pragma comment(lib, "dxguid")
@@ -836,8 +838,14 @@ private:
     ID2D1Bitmap* m_pBitmap;
     GameBoyCore m_gbCore;
     AudioDriver m_audio;
+    BOOL m_isFullscreen;
+    WINDOWPLACEMENT m_wpPrev;
+    HMENU m_hMenu;
 public:
-    App() : m_hwnd(NULL), m_pDirect2dFactory(NULL), m_pRenderTarget(NULL), m_pBitmap(NULL) {}
+    App() : m_hwnd(NULL), m_pDirect2dFactory(NULL), m_pRenderTarget(NULL), m_pBitmap(NULL),
+        m_isFullscreen(FALSE), m_hMenu(NULL) {
+        ZeroMemory(&m_wpPrev, sizeof(m_wpPrev));
+    }
     ~App() {
         m_gbCore.SaveRAM();
         SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); SafeRelease(&m_pDirect2dFactory);
@@ -859,8 +867,21 @@ public:
         AppendMenu(hSubMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hSubMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenu(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSubMenu, L"File");
-        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, GB_WIDTH * 4, GB_HEIGHT * 4, NULL, hMenu, hInstance, this);
+        int screenW = GetSystemMetrics(SM_CXSCREEN);
+        int screenH = GetSystemMetrics(SM_CYSCREEN);
+        int winW = GB_WIDTH * 4;
+        int winH = GB_HEIGHT * 4;
+        RECT rc = { 0, 0, winW, winH };
+        AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, TRUE);
+        int finalW = rc.right - rc.left;
+        int finalH = rc.bottom - rc.top;
+        int posX = (screenW - finalW) / 2;
+        int posY = (screenH - finalH) / 2;
+        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator", WS_OVERLAPPEDWINDOW,
+            posX, posY, finalW, finalH, NULL, hMenu, hInstance, this);
         if (m_hwnd) {
+            DragAcceptFiles(m_hwnd, TRUE);
+            m_hMenu = GetMenu(m_hwnd);
             ShowWindow(m_hwnd, nCmdShow);
             UpdateWindow(m_hwnd);
             if (!m_audio.Initialize(m_hwnd)) {
@@ -870,26 +891,96 @@ public:
         }
         return E_FAIL;
     }
+    void OpenRomFile(const std::wstring& path) {
+        PauseAudio();
+        std::wstring cleanPath = path;
+        if (!cleanPath.empty() && cleanPath.front() == L'\"') cleanPath.erase(0, 1);
+        if (!cleanPath.empty() && cleanPath.back() == L'\"') cleanPath.pop_back();
+        if (m_gbCore.LoadRom(cleanPath)) {
+            std::string titleStr = m_gbCore.GetTitle();
+            std::wstring wTitle(titleStr.begin(), titleStr.end());
+            std::wstring winTitle = L"GameBoy Emulator - " + wTitle;
+            SetWindowText(m_hwnd, winTitle.c_str());
+        }
+        ResumeAudio();
+    }
+    void OnDropFiles(HDROP hDrop) {
+        wchar_t szFile[MAX_PATH];
+        if (DragQueryFile(hDrop, 0, szFile, MAX_PATH) > 0) {
+            OpenRomFile(szFile);
+            SetForegroundWindow(m_hwnd);
+            SetFocus(m_hwnd);
+        }
+        DragFinish(hDrop);
+    }
+    void ToggleFullscreen() {
+        DWORD dwStyle = GetWindowLong(m_hwnd, GWL_STYLE);
+        if (m_isFullscreen) {
+            SetWindowLong(m_hwnd, GWL_STYLE, dwStyle | WS_OVERLAPPEDWINDOW);
+            SetWindowPlacement(m_hwnd, &m_wpPrev);
+            SetWindowPos(m_hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            SetMenu(m_hwnd, m_hMenu);
+            m_isFullscreen = FALSE;
+        }
+        else {
+            m_wpPrev.length = sizeof(WINDOWPLACEMENT);
+            GetWindowPlacement(m_hwnd, &m_wpPrev);
+            DWORD dwNewStyle = dwStyle & ~WS_OVERLAPPEDWINDOW;
+            SetWindowLong(m_hwnd, GWL_STYLE, dwNewStyle);
+            SetMenu(m_hwnd, NULL);
+            HMONITOR hMonitor = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTOPRIMARY);
+            MONITORINFO mi = { sizeof(MONITORINFO) };
+            GetMonitorInfo(hMonitor, &mi);
+            SetWindowPos(m_hwnd, HWND_TOP,
+                mi.rcMonitor.left, mi.rcMonitor.top,
+                mi.rcMonitor.right - mi.rcMonitor.left,
+                mi.rcMonitor.bottom - mi.rcMonitor.top,
+                SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            m_isFullscreen = TRUE;
+        }
+    }
     void RunMessageLoop() {
+        timeBeginPeriod(1);
         MSG msg;
+        LARGE_INTEGER frequency;
+        QueryPerformanceFrequency(&frequency);
+        LARGE_INTEGER lastTime;
+        QueryPerformanceCounter(&lastTime);
+        const double TARGET_FPS = 59.7275;
+        const double SECONDS_PER_FRAME = 1.0 / TARGET_FPS;
         while (true) {
             if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
                 if (msg.message == WM_QUIT) break;
                 TranslateMessage(&msg); DispatchMessage(&msg);
             }
             else {
-                const int BYTES_PER_FRAME = (SAMPLE_RATE / 60) * 2 * sizeof(int16_t);
-                int freeSpace = m_audio.GetBufferFreeSpace();
-                if (freeSpace > BYTES_PER_FRAME) {
-                    m_gbCore.StepFrame();
-                    m_audio.PushSamples(m_gbCore.GetAudioSamples());
-                    OnRender();
+                LARGE_INTEGER currentTime;
+                QueryPerformanceCounter(&currentTime);
+                double elapsed = static_cast<double>(currentTime.QuadPart - lastTime.QuadPart) / frequency.QuadPart;
+                if (elapsed > 0.5) {
+                    lastTime = currentTime;
+                    elapsed = 0;
+                }
+                if (elapsed >= SECONDS_PER_FRAME) {
+                    int framesToCatchUp = (int)(elapsed / SECONDS_PER_FRAME);
+                    if (framesToCatchUp > 3) framesToCatchUp = 3;
+                    lastTime.QuadPart += (LONGLONG)(framesToCatchUp * SECONDS_PER_FRAME * frequency.QuadPart);
+                    for (int i = 0; i < framesToCatchUp; i++) {
+                        m_gbCore.StepFrame();
+                        m_audio.PushSamples(m_gbCore.GetAudioSamples());
+                        if (i == framesToCatchUp - 1) {
+                            OnRender();
+                        }
+                    }
                 }
                 else {
-                    Sleep(1);
+                    if (SECONDS_PER_FRAME - elapsed > 0.002) {
+                        Sleep(1);
+                    }
                 }
             }
         }
+        timeEndPeriod(1);
     }
     void PauseAudio() { m_audio.Pause(); }
     void ResumeAudio() { m_audio.Resume(); }
@@ -937,7 +1028,16 @@ private:
             if (m_pBitmap) {
                 m_pBitmap->CopyFromMemory(NULL, m_gbCore.GetPixelData(), GB_WIDTH * sizeof(uint32_t));
                 D2D1_SIZE_F rtSize = m_pRenderTarget->GetSize();
-                m_pRenderTarget->DrawBitmap(m_pBitmap, D2D1::RectF(0, 0, rtSize.width, rtSize.height), 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL);
+                float scaleX = rtSize.width / (float)GB_WIDTH;
+                float scaleY = rtSize.height / (float)GB_HEIGHT;
+                float scale = (std::min)(scaleX, scaleY);
+                float drawW = GB_WIDTH * scale;
+                float drawH = GB_HEIGHT * scale;
+                float offsetX = (rtSize.width - drawW) / 2.0f;
+                float offsetY = (rtSize.height - drawH) / 2.0f;
+                m_pRenderTarget->DrawBitmap(m_pBitmap,
+                    D2D1::RectF(offsetX, offsetY, offsetX + drawW, offsetY + drawH),
+                    1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL);
             }
             if (m_pRenderTarget->EndDraw() == D2DERR_RECREATE_TARGET) { SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); }
         }
@@ -955,12 +1055,25 @@ private:
             if (pApp) {
                 bool pressed = (message == WM_KEYDOWN);
                 int key = -1;
+                if (pressed && wParam == VK_F11) {
+                    pApp->ToggleFullscreen();
+                    return 0;
+                }
+                if (pressed && wParam == VK_ESCAPE) {
+                    if (pApp->m_isFullscreen) {
+                        pApp->ToggleFullscreen();
+                    }
+                    return 0;
+                }
                 switch (wParam) {
                 case VK_RIGHT: key = 0; break; case VK_LEFT:  key = 1; break; case VK_UP:    key = 2; break; case VK_DOWN:  key = 3; break;
                 case 'Z':      key = 4; break; case 'X':      key = 5; break; case VK_SHIFT: key = 6; break; case VK_RETURN:key = 7; break;
                 }
                 if (key != -1) pApp->m_gbCore.InputKey(key, pressed);
             }
+            return 0;
+        case WM_DROPFILES:
+            if (pApp) pApp->OnDropFiles((HDROP)wParam);
             return 0;
         case WM_ENTERMENULOOP:
         case WM_ENTERSIZEMOVE:
@@ -982,10 +1095,20 @@ private:
         return DefWindowProc(hwnd, message, wParam, lParam);
     }
 };
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
-    CoInitialize(NULL);
+int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int nShowCmd) {
+    (void)CoInitialize(NULL);
     App app;
-    if (SUCCEEDED(app.Initialize(hInstance, nCmdShow))) app.RunMessageLoop();
+    if (SUCCEEDED(app.Initialize(hInstance, nShowCmd))) {
+        int argc;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv) {
+            if (argc > 1) {
+                app.OpenRomFile(argv[1]);
+            }
+            LocalFree(argv);
+        }
+        app.RunMessageLoop();
+    }
     CoUninitialize();
     return 0;
 }

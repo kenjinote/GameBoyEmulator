@@ -931,6 +931,7 @@ public:
             SetWindowPos(m_hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
             SetMenu(m_hwnd, m_hMenu);
             CheckMenuItem(m_hMenu, IDM_FILE_FULLSCREEN, MF_UNCHECKED);
+            ShowCursor(TRUE);
             m_isFullscreen = FALSE;
         }
         else {
@@ -948,6 +949,7 @@ public:
                 mi.rcMonitor.right - mi.rcMonitor.left,
                 mi.rcMonitor.bottom - mi.rcMonitor.top,
                 SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            ShowCursor(FALSE);
             m_isFullscreen = TRUE;
         }
     }
@@ -1063,6 +1065,13 @@ private:
             if (LOWORD(wParam) == IDM_FILE_EXIT) DestroyWindow(hwnd);
             if (LOWORD(wParam) == IDM_FILE_FULLSCREEN && pApp) pApp->ToggleFullscreen();
             return 0;
+        case WM_NCHITTEST: {
+            LRESULT hit = DefWindowProc(hwnd, message, wParam, lParam);
+            if (hit == HTCLIENT && pApp && !pApp->m_isFullscreen) {
+                return HTCAPTION;
+            }
+            return hit;
+        }
         case WM_SIZE: if (pApp && pApp->m_pRenderTarget) pApp->m_pRenderTarget->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam))); return 0;
         case WM_KEYDOWN: case WM_KEYUP:
             if (pApp) {

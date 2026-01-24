@@ -1,13 +1,8 @@
-﻿#ifndef UNICODE
-#define UNICODE
-#endif 
-
-#define _CRT_SECURE_NO_WARNINGS 
-
+﻿#define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
 #include <commdlg.h>
 #include <d2d1.h>
-#include <dsound.h> // DirectSound
+#include <dsound.h>
 #include <vector>
 #include <cstdint>
 #include <cstring>
@@ -16,35 +11,28 @@
 #include <ctime>
 #include <cmath>
 #include <algorithm>
-
-#pragma comment(lib, "d2d1.lib")
-#pragma comment(lib, "dsound.lib")
-#pragma comment(lib, "dxguid.lib")
-#pragma comment(lib, "winmm.lib")
-#pragma comment(lib, "ole32.lib")
-
+#pragma comment(lib, "d2d1")
+#pragma comment(lib, "dsound")
+#pragma comment(lib, "dxguid")
+#pragma comment(lib, "winmm")
+#pragma comment(lib, "ole32")
 using Byte = uint8_t;
 using Word = uint16_t;
 using SignedByte = int8_t;
-
 const int GB_WIDTH = 160;
 const int GB_HEIGHT = 144;
 const int SAMPLE_RATE = 44100;
-
 #define IDM_FILE_OPEN 1001
 #define IDM_FILE_EXIT 1002
-
 template <class T> void SafeRelease(T** ppT) {
     if (*ppT) { (*ppT)->Release(); *ppT = NULL; }
 }
-
 // 前方宣言
 class APU;
 class MMU;
 class PPU;
 class CPU;
 class GameBoyCore;
-
 // -----------------------------------------------------------------------------
 // AudioDriver
 // -----------------------------------------------------------------------------
@@ -54,7 +42,6 @@ class AudioDriver {
     IDirectSoundBuffer* m_pSecondary;
     int m_bufferSize;
     int m_nextWriteOffset;
-
 public:
     AudioDriver() : m_pDS(NULL), m_pPrimary(NULL), m_pSecondary(NULL), m_bufferSize(0), m_nextWriteOffset(0) {}
     ~AudioDriver() {
@@ -62,16 +49,13 @@ public:
         SafeRelease(&m_pPrimary);
         SafeRelease(&m_pDS);
     }
-
     bool Initialize(HWND hwnd) {
         if (FAILED(DirectSoundCreate8(NULL, &m_pDS, NULL))) return false;
         if (FAILED(m_pDS->SetCooperativeLevel(hwnd, DSSCL_PRIORITY))) return false;
-
         DSBUFFERDESC dsbd = { 0 };
         dsbd.dwSize = sizeof(DSBUFFERDESC);
         dsbd.dwFlags = DSBCAPS_PRIMARYBUFFER;
         if (FAILED(m_pDS->CreateSoundBuffer(&dsbd, &m_pPrimary, NULL))) return false;
-
         WAVEFORMATEX wfx = { 0 };
         wfx.wFormatTag = WAVE_FORMAT_PCM;
         wfx.nChannels = 2;
@@ -80,19 +64,15 @@ public:
         wfx.nBlockAlign = 4;
         wfx.nAvgBytesPerSec = SAMPLE_RATE * 4;
         if (FAILED(m_pPrimary->SetFormat(&wfx))) return false;
-
         m_bufferSize = wfx.nAvgBytesPerSec / 10;
         dsbd.dwFlags = DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLVOLUME;
         dsbd.dwBufferBytes = m_bufferSize;
         dsbd.lpwfxFormat = &wfx;
-
         if (FAILED(m_pDS->CreateSoundBuffer(&dsbd, &m_pSecondary, NULL))) return false;
-
         ClearBuffer();
         m_pSecondary->Play(0, 0, DSBPLAY_LOOPING);
         return true;
     }
-
     void ClearBuffer() {
         void* p1, * p2; DWORD l1, l2;
         if (SUCCEEDED(m_pSecondary->Lock(0, m_bufferSize, &p1, &l1, &p2, &l2, 0))) {
@@ -102,10 +82,8 @@ public:
         }
         m_nextWriteOffset = 0;
     }
-
     void Pause() { if (m_pSecondary) m_pSecondary->Stop(); }
     void Resume() { if (m_pSecondary) m_pSecondary->Play(0, 0, DSBPLAY_LOOPING); }
-
     int GetBufferFreeSpace() {
         if (!m_pSecondary) return 0;
         DWORD play, write;
@@ -117,7 +95,6 @@ public:
         if (freeSpace > safety) freeSpace -= safety; else freeSpace = 0;
         return freeSpace;
     }
-
     void PushSamples(const std::vector<int16_t>& samples) {
         if (!m_pSecondary || samples.empty()) return;
         int size = (int)samples.size() * 2;
@@ -135,7 +112,6 @@ public:
         }
     }
 };
-
 // -----------------------------------------------------------------------------
 // APU
 // -----------------------------------------------------------------------------
@@ -151,7 +127,6 @@ public:
     std::vector<int16_t> buffer;
     const int dutyPatterns[4][8] = { {0,0,0,0,0,0,0,1}, {1,0,0,0,0,0,0,1}, {1,0,0,0,0,1,1,1}, {0,1,1,1,1,1,1,0} };
     uint16_t lfsr;
-
     APU() { Reset(); }
     void Reset() {
         memset(regs, 0, sizeof(regs)); memset(waveRam, 0, sizeof(waveRam)); buffer.clear();
@@ -260,7 +235,6 @@ public:
         while (accCount >= CYCLES_PER_SAMPLE) { buffer.push_back((int16_t)((accL / CYCLES_PER_SAMPLE) * 64)); buffer.push_back((int16_t)((accR / CYCLES_PER_SAMPLE) * 64)); accL -= (int)(accL / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE; accR -= (int)(accR / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE; accCount -= CYCLES_PER_SAMPLE; }
     }
 };
-
 // -----------------------------------------------------------------------------
 // MMU
 // -----------------------------------------------------------------------------
@@ -274,73 +248,90 @@ public:
     std::vector<Byte> io;
     std::vector<Byte> oam;
     std::vector<Byte> sram;
-
     Byte interruptFlag;
     Byte interruptEnable;
-
-    int mbcType;
+    int mbcType; // mbcType: 0=ROM, 1=MBC1, 2=MBC2, 3=MBC3, 4=HuC1, 5=MBC5
     bool ramEnable;
     bool hasBattery;
     int romBank;
     int ramBank;
     int bankingMode;
-
+    size_t ramSizeMask;
     int divCounter;
     int tacCounter;
-
     bool rtcMapped;
     Byte rtcS, rtcM, rtcH, rtcDL, rtcDH, rtcLatch;
     time_t lastTime;
-
     Byte joypadButtons;
     Byte joypadDir;
-
     APU* apu;
-
     MMU() : apu(nullptr) { Reset(); }
     void SetAPU(APU* p) { apu = p; }
-
     void Reset() {
         vram.assign(0x2000, 0); wram.assign(0x2000, 0); hram.assign(0x80, 0); io.assign(0x80, 0); oam.assign(0xA0, 0); sram.assign(0x20000, 0);
         if (rom.size() < 0x8000) rom.resize(0x8000, 0);
         interruptFlag = 0; interruptEnable = 0; mbcType = 0; ramEnable = false; romBank = 1; ramBank = 0; bankingMode = 0;
         divCounter = 0; tacCounter = 0; rtcMapped = false; rtcS = rtcM = rtcH = rtcDL = rtcDH = rtcLatch = 0; lastTime = time(NULL);
         joypadButtons = 0x0F; joypadDir = 0x0F; hasBattery = false;
+        ramSizeMask = 0;
     }
-
     void LoadRomData(const std::vector<Byte>& data) {
         rom = data;
         if (rom.size() < 0x8000) rom.resize(0x8000, 0);
         if (sram.size() < 0x20000) sram.resize(0x20000, 0);
         std::fill(sram.begin(), sram.end(), 0);
-
         Byte type = rom[0x0147];
-        if (type == 0x05 || type == 0x06) mbcType = 2;
-        else if (type >= 0x0F && type <= 0x13) mbcType = 3;
-        else if (type >= 0x01 && type <= 0x03) mbcType = 1;
-        else if (type >= 0x19 && type <= 0x1E) mbcType = 5;
+        if (type == 0x05 || type == 0x06) mbcType = 2; // MBC2
+        else if (type >= 0x0F && type <= 0x13) mbcType = 3; // MBC3
+        else if (type >= 0x01 && type <= 0x03) mbcType = 1; // MBC1
+        else if (type >= 0x19 && type <= 0x1E) mbcType = 5; // MBC5
+        else if (type == 0xFF) mbcType = 4; // HuC1
         else mbcType = 0;
-
         hasBattery = (type == 0x03 || type == 0x06 || type == 0x09 || type == 0x0F || type == 0x10 || type == 0x13 || type == 0x1B || type == 0x1E || type == 0xFF);
         ramEnable = false; romBank = 1; ramBank = 0; bankingMode = 0; rtcMapped = false;
+        Byte ramSizeCode = rom[0x0149];
+        switch (ramSizeCode) {
+        case 0x00: ramSizeMask = 0; break;          // No RAM
+        case 0x01: ramSizeMask = 0x07FF; break;     // 2KB
+        case 0x02: ramSizeMask = 0x1FFF; break;     // 8KB (SaGa2など)
+        case 0x03: ramSizeMask = 0x7FFF; break;     // 32KB
+        case 0x04: ramSizeMask = 0x1FFFF; break;    // 128KB
+        case 0x05: ramSizeMask = 0xFFFF; break;     // 64KB
+        default:   ramSizeMask = 0; break;
+        }
+        if (mbcType == 2) ramSizeMask = 0x1FF;
     }
-
     void LoadRAM(const std::wstring& path) {
         if (!hasBattery) return;
-        FILE* fp = NULL; _wfopen_s(&fp, path.c_str(), L"rb");
-        if (fp) { fseek(fp, 0, SEEK_END); long size = ftell(fp); fseek(fp, 0, SEEK_SET); if (size > 0) { if (size > (long)sram.size()) sram.resize(size); fread(sram.data(), 1, size, fp); } fclose(fp); }
+        FILE* fp = NULL;
+        _wfopen_s(&fp, path.c_str(), L"rb");
+        if (fp) {
+            fseek(fp, 0, SEEK_END);
+            long fileSize = ftell(fp);
+            fseek(fp, 0, SEEK_SET);
+            if (fileSize > 0) {
+                if (fileSize > (long)sram.size()) sram.resize(fileSize);
+                fread(sram.data(), 1, fileSize, fp);
+            }
+            fclose(fp);
+        }
     }
     void SaveRAM(const std::wstring& path) {
         if (!hasBattery) return;
-        FILE* fp = NULL; _wfopen_s(&fp, path.c_str(), L"wb"); if (fp) { fwrite(sram.data(), 1, sram.size(), fp); fclose(fp); }
+        size_t saveSize = ramSizeMask + 1;
+        if (saveSize <= 1) return;
+        if (saveSize > sram.size()) saveSize = sram.size();
+        FILE* fp = NULL;
+        _wfopen_s(&fp, path.c_str(), L"wb");
+        if (fp) {
+            fwrite(sram.data(), 1, saveSize, fp);
+            fclose(fp);
+        }
     }
-
     void RequestInterrupt(int bit) { interruptFlag |= (1 << bit); }
-
     void DoDMA(Byte value) {
         Word srcBase = value << 8; for (int i = 0; i < 0xA0; i++) oam[i] = Read(srcBase + i);
     }
-
     void UpdateRTC() {
         if (mbcType != 3) return;
         time_t now = time(NULL);
@@ -356,11 +347,10 @@ public:
         Byte tac = io[0x07];
         if (tac & 0x04) {
             tacCounter += cycles; int threshold = 1024;
-            switch (tac & 0x03) { case 0: threshold = 1024; break; case 1: threshold = 16; break; case 2: threshold = 64; break; case 3: threshold = 256; break; }
-                                        while (tacCounter >= threshold) { tacCounter -= threshold; Byte tima = io[0x05]; if (tima == 0xFF) { io[0x05] = io[0x06]; RequestInterrupt(2); } else { io[0x05]++; } }
+        switch (tac & 0x03) { case 0: threshold = 1024; break; case 1: threshold = 16; break; case 2: threshold = 64; break; case 3: threshold = 256; break; }
+                                    while (tacCounter >= threshold) { tacCounter -= threshold; Byte tima = io[0x05]; if (tima == 0xFF) { io[0x05] = io[0x06]; RequestInterrupt(2); } else { io[0x05]++; } }
         }
     }
-
     void CheckJoypadInterrupt() {
         Byte select = io[0x00];
         bool req = false;
@@ -372,32 +362,49 @@ public:
         }
         if (req) RequestInterrupt(4);
     }
-
     Byte GetJoypadState() {
         Byte select = io[0x00]; Byte result = 0xCF | select;
         if (!(select & 0x10)) result &= (0xF0 | joypadDir);
         if (!(select & 0x20)) result &= (0xF0 | joypadButtons);
         return result;
     }
-
     Byte Read(Word addr) {
-        if (addr < 0x4000) return rom[addr];
+        int maxBanks = (int)(rom.size() / 0x4000); if (maxBanks == 0) maxBanks = 1;
+        if (addr < 0x4000) {
+            if (mbcType == 1 && bankingMode == 1) {
+                int bank = (ramBank << 5);
+                bank %= maxBanks;
+                return rom[(bank * 0x4000) + addr];
+            }
+            return rom[addr];
+        }
         if (addr < 0x8000) {
             int bank = romBank;
             if (mbcType == 1 && bankingMode == 0) bank |= (ramBank << 5);
-            int maxBanks = (int)(rom.size() / 0x4000); if (maxBanks == 0) maxBanks = 1; bank %= maxBanks;
+            if (mbcType == 4) bank |= (ramBank << 6); // HuC1
+            bank %= maxBanks;
             return rom[(bank * 0x4000) + (addr - 0x4000)];
         }
         if (addr < 0xA000) return vram[addr - 0x8000];
         if (addr < 0xC000) {
             if (!ramEnable) return 0xFF;
             if (mbcType == 3 && rtcMapped) {
-            switch (ramBank) { case 0x08: return rtcS; case 0x09: return rtcM; case 0x0A: return rtcH; case 0x0B: return rtcDL; case 0x0C: return rtcDH; default: return 0xFF; }
+        switch (ramBank) { case 0x08: return rtcS; case 0x09: return rtcM; case 0x0A: return rtcH; case 0x0B: return rtcDL; case 0x0C: return rtcDH; default: return 0xFF; }
             }
-            else if (mbcType == 2) { if (addr < 0xA200) return (sram[addr - 0xA000] & 0x0F); return 0xFF; }
+            else if (mbcType == 2) {
+                return (sram[(addr - 0xA000) & ramSizeMask] & 0x0F) | 0xF0;
+            }
             else {
-                int bank = (mbcType == 3 || mbcType == 5) ? ramBank : ((bankingMode == 1) ? ramBank : 0);
-                int idx = (bank * 0x2000) + (addr - 0xA000); if (idx < sram.size()) return sram[idx]; return 0xFF;
+                if (ramSizeMask == 0) return 0xFF;
+                int bank = 0;
+                if (mbcType == 1) {
+                    bank = (bankingMode == 1) ? ramBank : 0;
+                }
+                else if (mbcType == 3 || mbcType == 5 || mbcType == 4) {
+                    bank = ramBank;
+                }
+                size_t idx = (bank * 0x2000) + (addr - 0xA000);
+                return sram[idx & ramSizeMask];
             }
         }
         if (addr < 0xE000) return wram[addr - 0xC000];
@@ -412,7 +419,6 @@ public:
         if (addr == 0xFFFF) return interruptEnable;
         return 0xFF;
     }
-
     void Write(Word addr, Byte value) {
         if (addr < 0x8000) {
             if (mbcType == 1) {
@@ -429,6 +435,12 @@ public:
                 else if (addr < 0x6000) { ramBank = value; rtcMapped = (value >= 0x08 && value <= 0x0C); }
                 else if (addr < 0x8000) rtcLatch = value;
             }
+            else if (mbcType == 4) {
+                if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A);
+                else if (addr < 0x4000) { romBank = value & 0x3F; /* HuC1: 0->1変換なし */ }
+                else if (addr < 0x6000) ramBank = value & 0x03;
+                else if (addr < 0x8000) bankingMode = value & 0x01;
+            }
             else if (mbcType == 5) {
                 if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A); else if (addr < 0x3000) romBank = (romBank & 0x100) | value; else if (addr < 0x4000) romBank = (romBank & 0x0FF) | ((value & 0x01) << 8); else if (addr < 0x6000) ramBank = value & 0x0F;
             }
@@ -438,9 +450,16 @@ public:
         if (addr < 0xC000) {
             if (ramEnable) {
                 if (mbcType == 3 && rtcMapped) { /* RTC Write */ }
-                else if (mbcType == 2) { if (addr < 0xA200) sram[addr - 0xA000] = value & 0x0F; }
+                else if (mbcType == 2) {
+                    sram[(addr - 0xA000) & ramSizeMask] = value & 0x0F;
+                }
                 else {
-                    int bank = (mbcType == 3 || mbcType == 5) ? ramBank : ((bankingMode == 1) ? ramBank : 0); int idx = (bank * 0x2000) + (addr - 0xA000); if (idx < sram.size()) sram[idx] = value;
+                    if (ramSizeMask == 0) return;
+                    int bank = 0;
+                    if (mbcType == 1) bank = (bankingMode == 1) ? ramBank : 0;
+                    else if (mbcType == 3 || mbcType == 5 || mbcType == 4) bank = ramBank;
+                    size_t idx = (bank * 0x2000) + (addr - 0xA000);
+                    sram[idx & ramSizeMask] = value;
                 }
             }
             return;
@@ -449,41 +468,35 @@ public:
         if (addr < 0xFE00) { wram[addr - 0xE000] = value; return; }
         if (addr < 0xFEA0) { oam[addr - 0xFE00] = value; return; }
         if (addr < 0xFF00) return;
-
         if (addr == 0xFF00) { io[0x00] = value; CheckJoypadInterrupt(); return; }
         if (addr == 0xFF04) { io[0x04] = 0; divCounter = 0; return; }
         if (addr == 0xFF0F) { interruptFlag = value; return; }
         if (addr == 0xFF46) { DoDMA(value); return; }
         if (addr == 0xFF41) { io[0x41] = (value & 0xF8) | (io[0x41] & 0x07); return; }
         if (addr == 0xFF44) { io[0x44] = 0; return; }
-
         if (addr >= 0xFF10 && addr <= 0xFF3F) { if (apu) apu->Write(addr, value); return; }
         if (addr < 0xFF80) { io[addr - 0xFF00] = value; return; }
         if (addr < 0xFFFF) { hram[addr - 0xFF80] = value; return; }
         if (addr == 0xFFFF) { interruptEnable = value; return; }
     }
-
     void SetKey(int keyId, bool pressed) {
         Byte* target = (keyId < 4) ? &joypadDir : &joypadButtons;
         int bit = keyId % 4;
         Byte oldVal = *target;
         if (pressed) *target &= ~(1 << bit); else *target |= (1 << bit);
-
         if (pressed && (oldVal & (1 << bit))) {
             CheckJoypadInterrupt();
         }
     }
-
     std::string GetTitle() {
         if (rom.size() < 0x143) return "";
         char buf[17] = { 0 }; for (int i = 0; i < 16; i++) { char c = rom[0x0134 + i]; if (c == 0) break; buf[i] = c; }
         return std::string(buf);
     }
     std::string GetMBCName() {
-        if (mbcType == 1) return "MBC1"; if (mbcType == 2) return "MBC2"; if (mbcType == 3) return "MBC3"; if (mbcType == 5) return "MBC5"; return "ROM ONLY";
+        if (mbcType == 1) return "MBC1"; if (mbcType == 2) return "MBC2"; if (mbcType == 3) return "MBC3"; if (mbcType == 5) return "MBC5"; if (mbcType == 4) return "HuC1"; return "ROM ONLY";
     }
 };
-
 // -----------------------------------------------------------------------------
 // PPU
 // -----------------------------------------------------------------------------
@@ -505,18 +518,15 @@ public:
     Byte GetSTAT() { return mmu->io[0x41]; }
     void SetSTAT(Byte v) { mmu->io[0x41] = v; }
     Byte GetLYC() { return mmu->io[0x45]; }
-
     void Step(int cycles) {
         Byte lcdc = GetLCDC();
         if (!(lcdc & 0x80)) {
             SetLY(0); cycleCounter = 0; mode = 2; windowLine = 0; statIntSignal = false;
             SetSTAT(GetSTAT() & 0xFC); return;
         }
-
         cycleCounter += cycles; Byte ly = GetLY(); Byte stat = GetSTAT();
         bool lycMatch = (ly == GetLYC());
         if (lycMatch) stat |= 0x04; else stat &= ~0x04;
-
         if (mode == 2) {
             if (cycleCounter >= 80) {
                 cycleCounter -= 80; mode = 3;
@@ -543,7 +553,6 @@ public:
             }
         }
         stat = (stat & 0xFC) | (mode & 0x03); SetSTAT(stat);
-
         bool currentSignal = false;
         if ((stat & 0x40) && lycMatch) currentSignal = true;
         if ((stat & 0x20) && (mode == 2)) currentSignal = true;
@@ -552,14 +561,12 @@ public:
         if (currentSignal && !statIntSignal) mmu->RequestInterrupt(1);
         statIntSignal = currentSignal;
     }
-
     void RenderScanline(int line) {
         if (!screenBuffer) return;
         Byte lcdc = latchLCDC; if (!(lcdc & 0x01)) return;
         Byte scy = latchSCY; Byte scx = latchSCX; Byte bgp = latchBGP; Byte wy = latchWY; int wx = latchWX;
         uint32_t palette[4]; for (int i = 0; i < 4; i++) palette[i] = PALETTE[(bgp >> (i * 2)) & 3];
         Word mapBase = (lcdc & 0x08) ? 0x9C00 : 0x9800; Word tileBase = (lcdc & 0x10) ? 0x8000 : 0x9000; bool unsignedTile = (lcdc & 0x10);
-
         Byte mapY = line + scy;
         for (int x = 0; x < 160; ++x) {
             Byte mapX = x + scx; Word tileIdxAddr = mapBase + (mapY / 8) * 32 + (mapX / 8); Byte tileIdx = mmu->Read(tileIdxAddr);
@@ -568,7 +575,6 @@ public:
             int bit = 7 - (mapX % 8); int colorId = ((b1 >> bit) & 1) | (((b2 >> bit) & 1) << 1);
             screenBuffer[line * 160 + x] = palette[colorId];
         }
-
         if ((lcdc & 0x20) && (line >= wy) && (wx <= 159)) {
             Word winMapBase = (lcdc & 0x40) ? 0x9C00 : 0x9800; Byte winY = (Byte)windowLine;
             for (int x = 0; x < 160; ++x) {
@@ -582,7 +588,6 @@ public:
             }
             windowLine++;
         }
-
         if (!(lcdc & 0x02)) return;
         Byte obp0 = latchOBP0; Byte obp1 = latchOBP1; uint32_t palObj0[4], palObj1[4];
         for (int i = 0; i < 4; i++) { palObj0[i] = PALETTE[(obp0 >> (i * 2)) & 3]; palObj1[i] = PALETTE[(obp1 >> (i * 2)) & 3]; }
@@ -602,7 +607,6 @@ public:
         }
     }
 };
-
 // -----------------------------------------------------------------------------
 // CPU
 // -----------------------------------------------------------------------------
@@ -616,7 +620,6 @@ public:
         Word sp, pc; bool ime; int imeDelay;
     } reg;
     MMU* mmu; bool halted, haltBugTriggered; int currentCycles;
-
     CPU(MMU* m) : mmu(m) { Reset(); }
     void Reset() { reg.af.af = 0x01B0; reg.bc.bc = 0x0013; reg.de.de = 0x00D8; reg.hl.hl = 0x014D; reg.sp = 0xFFFE; reg.pc = 0x0100; reg.ime = false; reg.imeDelay = 0; halted = false; haltBugTriggered = false; currentCycles = 0; }
     Byte Read(Word addr) { currentCycles += 4; return mmu->Read(addr); }
@@ -633,93 +636,105 @@ public:
     Byte GetR8(int idx) { switch (idx) { case 0: return reg.bc.b; case 1: return reg.bc.c; case 2: return reg.de.d; case 3: return reg.de.e; case 4: return reg.hl.h; case 5: return reg.hl.l; case 6: return Read(reg.hl.hl); case 7: return reg.af.a; } return 0; }
     void SetR8(int idx, Byte val) { switch (idx) { case 0: reg.bc.b = val; break; case 1: reg.bc.c = val; break; case 2: reg.de.d = val; break; case 3: reg.de.e = val; break; case 4: reg.hl.h = val; break; case 5: reg.hl.l = val; break; case 6: Write(reg.hl.hl, val); break; case 7: reg.af.a = val; break; } }
     Word GetR16(int idx, bool af = false) { switch (idx) { case 0: return reg.bc.bc; case 1: return reg.de.de; case 2: return reg.hl.hl; case 3: return af ? reg.af.af : reg.sp; } return 0; }
-    void SetR16(int idx, Word val, bool af = false) { switch (idx) { case 0: reg.bc.bc = val; break; case 1: reg.de.de = val; break; case 2: reg.hl.hl = val; break; case 3: if (af) { reg.af.af = val; reg.af.f &= 0xF0; } else { reg.sp = val; } break; } }
-                                                                           void ALU_ADD(Byte v) { int r = reg.af.a + v; F_Z((r & 0xFF) == 0); F_N(0); F_H((reg.af.a & 0xF) + (v & 0xF) > 0xF); F_C(r > 0xFF); reg.af.a = (Byte)r; }
-                                                                           void ALU_ADC(Byte v) { int c = IsC() ? 1 : 0; int r = reg.af.a + v + c; F_Z((r & 0xFF) == 0); F_N(0); F_H((reg.af.a & 0xF) + (v & 0xF) + c > 0xF); F_C(r > 0xFF); reg.af.a = (Byte)r; }
-                                                                           void ALU_SUB(Byte v) { int r = reg.af.a - v; F_Z((r & 0xFF) == 0); F_N(1); F_H((reg.af.a & 0xF) < (v & 0xF)); F_C(reg.af.a < v); reg.af.a = (Byte)r; }
-                                                                           void ALU_SBC(Byte v) { int c = IsC() ? 1 : 0; int r = reg.af.a - v - c; F_Z((r & 0xFF) == 0); F_N(1); F_H((reg.af.a & 0xF) < (v & 0xF) + c); F_C(r < 0); reg.af.a = (Byte)r; }
-                                                                           void ALU_AND(Byte v) { reg.af.a &= v; F_Z(reg.af.a == 0); F_N(0); F_H(1); F_C(0); }
-                                                                           void ALU_XOR(Byte v) { reg.af.a ^= v; F_Z(reg.af.a == 0); F_N(0); F_H(0); F_C(0); }
-                                                                           void ALU_OR(Byte v) { reg.af.a |= v; F_Z(reg.af.a == 0); F_N(0); F_H(0); F_C(0); }
-                                                                           void ALU_CP(Byte v) { int r = reg.af.a - v; F_Z((r & 0xFF) == 0); F_N(1); F_H((reg.af.a & 0xF) < (v & 0xF)); F_C(reg.af.a < v); }
-                                                                           void ALU_INC(Byte& v) { v++; F_Z(v == 0); F_N(0); F_H((v & 0xF) == 0); }
-                                                                           void ALU_DEC(Byte& v) { v--; F_Z(v == 0); F_N(1); F_H((v & 0xF) == 0xF); }
-                                                                           void RLC(Byte& v) { int c = v >> 7; v = (v << 1) | c; F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
-                                                                           void RRC(Byte& v) { int c = v & 1; v = (v >> 1) | (c << 7); F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
-                                                                           void RL(Byte& v) { int c = v >> 7; v = (v << 1) | (IsC() ? 1 : 0); F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
-                                                                           void RR(Byte& v) { int c = v & 1; v = (v >> 1) | (IsC() ? 0x80 : 0); F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
-                                                                           void SLA(Byte& v) { int c = v >> 7; v <<= 1; F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
-                                                                           void SRA(Byte& v) { int c = v & 1; v = (v >> 1) | (v & 0x80); F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
-                                                                           void SWAP(Byte& v) { v = (v << 4) | (v >> 4); F_Z(v == 0); F_N(0); F_H(0); F_C(0); }
-                                                                           void SRL(Byte& v) { int c = v & 1; v >>= 1; F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
-                                                                           void BIT(int b, Byte v) { F_Z(!(v & (1 << b))); F_N(0); F_H(1); }
-                                                                           void ExecCB() {
-                                                                               Byte op = Fetch(); Byte r = op & 0x07; Byte val = GetR8(r);
-                                                                               if (op < 0x40) {
-    switch ((op >> 3) & 7) { case 0: RLC(val); break; case 1: RRC(val); break; case 2: RL(val); break; case 3: RR(val); break; case 4: SLA(val); break; case 5: SRA(val); break; case 6: SWAP(val); break; case 7: SRL(val); break; } SetR8(r, val);
-                                                                               }
-                                                                               else {
-                                                                                   int bit = (op >> 3) & 7; if (op < 0x80) BIT(bit, val); else if (op < 0xC0) { val &= ~(1 << bit); SetR8(r, val); }
-                                                                                   else { val |= (1 << bit); SetR8(r, val); }
-                                                                               }
-                                                                           }
-                                                                           bool HandleInterrupts() {
-                                                                               if (reg.ime && (mmu->interruptFlag & mmu->interruptEnable)) {
-                                                                                   Byte fired = mmu->interruptFlag & mmu->interruptEnable;
-                                                                                   int bit = 0; if (fired & 0x01) bit = 0; else if (fired & 0x02) bit = 1; else if (fired & 0x04) bit = 2; else if (fired & 0x08) bit = 3; else if (fired & 0x10) bit = 4; else return false;
-                                                                                   reg.ime = false; mmu->interruptFlag &= ~(1 << bit); Push(reg.pc); reg.pc = 0x0040 + (bit * 8); currentCycles += 20; return true;
-                                                                               } return false;
-                                                                           }
-                                                                           int Step() {
-                                                                               if (reg.imeDelay > 0) { reg.imeDelay--; if (reg.imeDelay == 0) reg.ime = true; }
-                                                                               if (HandleInterrupts()) return currentCycles;
-                                                                               if (halted) {
-                                                                                   currentCycles = 4;
-                                                                                   if (mmu->interruptFlag & mmu->interruptEnable) { halted = false; if (!reg.ime) haltBugTriggered = true; }
-                                                                                   return currentCycles;
-                                                                               }
-                                                                               currentCycles = 0; Byte op = Fetch();
-                                                                               if ((op & 0xC0) == 0x40) { if (op == 0x76) halted = true; else SetR8((op >> 3) & 7, GetR8(op & 7)); }
-                                                                               else if ((op & 0xC0) == 0x80) {
-    Byte v = GetR8(op & 7); switch ((op >> 3) & 7) { case 0: ALU_ADD(v); break; case 1: ALU_ADC(v); break; case 2: ALU_SUB(v); break; case 3: ALU_SBC(v); break; case 4: ALU_AND(v); break; case 5: ALU_XOR(v); break; case 6: ALU_OR(v); break; case 7: ALU_CP(v); break; }
-                                                                               }
-                                                                               else {
-                                                                                   switch (op) {
-                                                                                   case 0x00: break; case 0x01: SetR16(0, Fetch16()); break; case 0x02: Write(reg.bc.bc, reg.af.a); break; case 0x03: SetR16(0, GetR16(0) + 1); break;
-                                                                                   case 0x04: { Byte v = GetR8(0); ALU_INC(v); SetR8(0, v); } break; case 0x05: { Byte v = GetR8(0); ALU_DEC(v); SetR8(0, v); } break; case 0x06: SetR8(0, Fetch()); break; case 0x07: RLC(reg.af.a); F_Z(0); break;
-                                                                                   case 0x08: { Word a = Fetch16(); Write(a, reg.sp & 0xFF); Write(a + 1, reg.sp >> 8); } break; case 0x09: { Word v = GetR16(0); Word hl = reg.hl.hl; int r = hl + v; F_N(0); F_H((hl & 0xFFF) + (v & 0xFFF) > 0xFFF); F_C(r > 0xFFFF); reg.hl.hl = (Word)r; } break;
-                                                                                   case 0x0A: reg.af.a = Read(reg.bc.bc); break; case 0x0B: SetR16(0, GetR16(0) - 1); break; case 0x0C: { Byte v = GetR8(1); ALU_INC(v); SetR8(1, v); } break; case 0x0D: { Byte v = GetR8(1); ALU_DEC(v); SetR8(1, v); } break; case 0x0E: SetR8(1, Fetch()); break; case 0x0F: RRC(reg.af.a); F_Z(0); break;
-                                                                                   case 0x10: Fetch(); halted = true; break; case 0x11: SetR16(1, Fetch16()); break; case 0x12: Write(reg.de.de, reg.af.a); break; case 0x13: SetR16(1, GetR16(1) + 1); break;
-                                                                                   case 0x14: { Byte v = GetR8(2); ALU_INC(v); SetR8(2, v); } break; case 0x15: { Byte v = GetR8(2); ALU_DEC(v); SetR8(2, v); } break; case 0x16: SetR8(2, Fetch()); break; case 0x17: RL(reg.af.a); F_Z(0); break;
-                                                                                   case 0x18: { SignedByte r = (SignedByte)Fetch(); reg.pc += r; } break; case 0x19: { Word v = GetR16(1); Word hl = reg.hl.hl; int r = hl + v; F_N(0); F_H((hl & 0xFFF) + (v & 0xFFF) > 0xFFF); F_C(r > 0xFFFF); reg.hl.hl = (Word)r; } break;
-                                                                                   case 0x1A: reg.af.a = Read(reg.de.de); break; case 0x1B: SetR16(1, GetR16(1) - 1); break; case 0x1C: { Byte v = GetR8(3); ALU_INC(v); SetR8(3, v); } break; case 0x1D: { Byte v = GetR8(3); ALU_DEC(v); SetR8(3, v); } break; case 0x1E: SetR8(3, Fetch()); break; case 0x1F: RR(reg.af.a); F_Z(0); break;
-                                                                                   case 0x20: { SignedByte r = (SignedByte)Fetch(); if (!IsZ()) reg.pc += r; } break; case 0x21: SetR16(2, Fetch16()); break; case 0x22: Write(reg.hl.hl++, reg.af.a); break; case 0x23: SetR16(2, GetR16(2) + 1); break;
-                                                                                   case 0x24: { Byte v = GetR8(4); ALU_INC(v); SetR8(4, v); } break; case 0x25: { Byte v = GetR8(4); ALU_DEC(v); SetR8(4, v); } break; case 0x26: SetR8(4, Fetch()); break; case 0x27: { int a = reg.af.a; if (!(reg.af.f & 0x40)) { if ((reg.af.f & 0x10) || a > 0x99) { a += 0x60; F_C(1); }if ((reg.af.f & 0x20) || (a & 0xF) > 9)a += 6; } else { if (reg.af.f & 0x10)a -= 0x60; if (reg.af.f & 0x20)a -= 6; } F_Z((a & 0xFF) == 0); F_H(0); reg.af.a = a; } break;
-                                                                                   case 0x28: { SignedByte r = (SignedByte)Fetch(); if (IsZ()) reg.pc += r; } break; case 0x29: { Word v = GetR16(2); Word hl = reg.hl.hl; int r = hl + v; F_N(0); F_H((hl & 0xFFF) + (v & 0xFFF) > 0xFFF); F_C(r > 0xFFFF); reg.hl.hl = (Word)r; } break;
-                                                                                   case 0x2A: reg.af.a = Read(reg.hl.hl++); break; case 0x2B: SetR16(2, GetR16(2) - 1); break; case 0x2C: { Byte v = GetR8(5); ALU_INC(v); SetR8(5, v); } break; case 0x2D: { Byte v = GetR8(5); ALU_DEC(v); SetR8(5, v); } break; case 0x2E: SetR8(5, Fetch()); break; case 0x2F: reg.af.a ^= 0xFF; F_N(1); F_H(1); break;
-                                                                                   case 0x30: { SignedByte r = (SignedByte)Fetch(); if (!IsC()) reg.pc += r; } break; case 0x31: SetR16(3, Fetch16(), false); break; case 0x32: Write(reg.hl.hl--, reg.af.a); break; case 0x33: SetR16(3, GetR16(3, false) + 1, false); break;
-                                                                                   case 0x34: { Byte v = Read(reg.hl.hl); ALU_INC(v); Write(reg.hl.hl, v); } break; case 0x35: { Byte v = Read(reg.hl.hl); ALU_DEC(v); Write(reg.hl.hl, v); } break; case 0x36: Write(reg.hl.hl, Fetch()); break; case 0x37: F_N(0); F_H(0); F_C(1); break;
-                                                                                   case 0x38: { SignedByte r = (SignedByte)Fetch(); if (IsC()) reg.pc += r; } break; case 0x39: { Word v = GetR16(3, false); Word hl = reg.hl.hl; int r = hl + v; F_N(0); F_H((hl & 0xFFF) + (v & 0xFFF) > 0xFFF); F_C(r > 0xFFFF); reg.hl.hl = (Word)r; } break;
-                                                                                   case 0x3A: reg.af.a = Read(reg.hl.hl--); break; case 0x3B: SetR16(3, GetR16(3, false) - 1, false); break; case 0x3C: { Byte v = reg.af.a; ALU_INC(v); reg.af.a = v; } break; case 0x3D: { Byte v = reg.af.a; ALU_DEC(v); reg.af.a = v; } break; case 0x3E: reg.af.a = Fetch(); break; case 0x3F: F_N(0); F_H(0); F_C(!IsC()); break;
-                                                                                   case 0xC0: if (!IsZ()) reg.pc = Pop(); else currentCycles -= 4; break; case 0xC1: SetR16(0, Pop()); break; case 0xC2: { Word a = Fetch16(); if (!IsZ()) reg.pc = a; } break; case 0xC3: reg.pc = Fetch16(); break;
-                                                                                   case 0xC4: { Word a = Fetch16(); if (!IsZ()) Push(reg.pc), reg.pc = a; } break; case 0xC5: Push(reg.bc.bc); break; case 0xC6: ALU_ADD(Fetch()); break; case 0xC7: Push(reg.pc); reg.pc = 0x00; break;
-                                                                                   case 0xC8: if (IsZ()) reg.pc = Pop(); else currentCycles -= 4; break; case 0xC9: reg.pc = Pop(); break; case 0xCA: { Word a = Fetch16(); if (IsZ()) reg.pc = a; } break; case 0xCB: ExecCB(); break;
-                                                                                   case 0xCC: { Word a = Fetch16(); if (IsZ()) Push(reg.pc), reg.pc = a; } break; case 0xCD: { Word a = Fetch16(); Push(reg.pc); reg.pc = a; } break; case 0xCE: ALU_ADC(Fetch()); break; case 0xCF: Push(reg.pc); reg.pc = 0x08; break;
-                                                                                   case 0xD0: if (!IsC()) reg.pc = Pop(); else currentCycles -= 4; break; case 0xD1: SetR16(1, Pop()); break; case 0xD2: { Word a = Fetch16(); if (!IsC()) reg.pc = a; } break; case 0xD4: { Word a = Fetch16(); if (!IsC()) Push(reg.pc), reg.pc = a; } break;
-                                                                                   case 0xD5: Push(reg.de.de); break; case 0xD6: ALU_SUB(Fetch()); break; case 0xD7: Push(reg.pc); reg.pc = 0x10; break; case 0xD8: if (IsC()) reg.pc = Pop(); else currentCycles -= 4; break;
-                                                                                   case 0xD9: reg.pc = Pop(); reg.imeDelay = 2; break; case 0xDA: { Word a = Fetch16(); if (IsC()) reg.pc = a; } break; case 0xDC: { Word a = Fetch16(); if (IsC()) Push(reg.pc), reg.pc = a; } break; case 0xDE: ALU_SBC(Fetch()); break; case 0xDF: Push(reg.pc); reg.pc = 0x18; break;
-                                                                                   case 0xE0: Write(0xFF00 | Fetch(), reg.af.a); break; case 0xE1: SetR16(2, Pop()); break; case 0xE2: Write(0xFF00 | reg.bc.c, reg.af.a); break; case 0xE5: Push(reg.hl.hl); break;
-                                                                                   case 0xE6: ALU_AND(Fetch()); break; case 0xE7: Push(reg.pc); reg.pc = 0x20; break; case 0xE8: { SignedByte r = (SignedByte)Fetch(); Word sp = reg.sp; int res = sp + r; F_Z(0); F_N(0); F_H((sp & 0xF) + (r & 0xF) > 0xF); F_C((sp & 0xFF) + (r & 0xFF) > 0xFF); reg.sp = (Word)res; } break;
-                                                                                   case 0xE9: reg.pc = reg.hl.hl; break; case 0xEA: Write(Fetch16(), reg.af.a); break; case 0xEE: ALU_XOR(Fetch()); break; case 0xEF: Push(reg.pc); reg.pc = 0x28; break;
-                                                                                   case 0xF0: reg.af.a = Read(0xFF00 | Fetch()); break; case 0xF1: SetR16(3, Pop(), true); break; case 0xF2: reg.af.a = Read(0xFF00 | reg.bc.c); break; case 0xF3: reg.ime = false; break;
-                                                                                   case 0xF5: Push(reg.af.af); break; case 0xF6: ALU_OR(Fetch()); break; case 0xF7: Push(reg.pc); reg.pc = 0x30; break; case 0xF8: { SignedByte r = (SignedByte)Fetch(); Word sp = reg.sp; int res = sp + r; F_Z(0); F_N(0); F_H((sp & 0xF) + (r & 0xF) > 0xF); F_C((sp & 0xFF) + (r & 0xFF) > 0xFF); reg.hl.hl = (Word)res; } break;
-                                                                                   case 0xF9: reg.sp = reg.hl.hl; break; case 0xFA: reg.af.a = Read(Fetch16()); break; case 0xFB: reg.imeDelay = 2; break; case 0xFE: ALU_CP(Fetch()); break; case 0xFF: Push(reg.pc); reg.pc = 0x38; break;
-                                                                                   }
-                                                                               }
-                                                                               return currentCycles;
-                                                                           }
+    void SetR16(int idx, Word val, bool af = false) {
+        switch (idx) { case 0: reg.bc.bc = val; break; case 1: reg.de.de = val; break; case 2: reg.hl.hl = val; break; case 3: if (af) { reg.af.af = val; reg.af.f &= 0xF0; } else { reg.sp = val; } break; }
+    }
+    void ALU_ADD(Byte v) { int r = reg.af.a + v; F_Z((r & 0xFF) == 0); F_N(0); F_H((reg.af.a & 0xF) + (v & 0xF) > 0xF); F_C(r > 0xFF); reg.af.a = (Byte)r; }
+    void ALU_ADC(Byte v) { int c = IsC() ? 1 : 0; int r = reg.af.a + v + c; F_Z((r & 0xFF) == 0); F_N(0); F_H((reg.af.a & 0xF) + (v & 0xF) + c > 0xF); F_C(r > 0xFF); reg.af.a = (Byte)r; }
+    void ALU_SUB(Byte v) { int r = reg.af.a - v; F_Z((r & 0xFF) == 0); F_N(1); F_H((reg.af.a & 0xF) < (v & 0xF)); F_C(reg.af.a < v); reg.af.a = (Byte)r; }
+    void ALU_SBC(Byte v) { int c = IsC() ? 1 : 0; int r = reg.af.a - v - c; F_Z((r & 0xFF) == 0); F_N(1); F_H((reg.af.a & 0xF) < (v & 0xF) + c); F_C(r < 0); reg.af.a = (Byte)r; }
+    void ALU_AND(Byte v) { reg.af.a &= v; F_Z(reg.af.a == 0); F_N(0); F_H(1); F_C(0); }
+    void ALU_XOR(Byte v) { reg.af.a ^= v; F_Z(reg.af.a == 0); F_N(0); F_H(0); F_C(0); }
+    void ALU_OR(Byte v) { reg.af.a |= v; F_Z(reg.af.a == 0); F_N(0); F_H(0); F_C(0); }
+    void ALU_CP(Byte v) { int r = reg.af.a - v; F_Z((r & 0xFF) == 0); F_N(1); F_H((reg.af.a & 0xF) < (v & 0xF)); F_C(reg.af.a < v); }
+    void ALU_INC(Byte& v) { v++; F_Z(v == 0); F_N(0); F_H((v & 0xF) == 0); }
+    void ALU_DEC(Byte& v) { v--; F_Z(v == 0); F_N(1); F_H((v & 0xF) == 0xF); }
+    void RLC(Byte& v) { int c = v >> 7; v = (v << 1) | c; F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
+    void RRC(Byte& v) { int c = v & 1; v = (v >> 1) | (c << 7); F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
+    void RL(Byte& v) { int c = v >> 7; v = (v << 1) | (IsC() ? 1 : 0); F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
+    void RR(Byte& v) { int c = v & 1; v = (v >> 1) | (IsC() ? 0x80 : 0); F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
+    void SLA(Byte& v) { int c = v >> 7; v <<= 1; F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
+    void SRA(Byte& v) { int c = v & 1; v = (v >> 1) | (v & 0x80); F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
+    void SWAP(Byte& v) { v = (v << 4) | (v >> 4); F_Z(v == 0); F_N(0); F_H(0); F_C(0); }
+    void SRL(Byte& v) { int c = v & 1; v >>= 1; F_Z(v == 0); F_N(0); F_H(0); F_C(c); }
+    void BIT(int b, Byte v) { F_Z(!(v & (1 << b))); F_N(0); F_H(1); }
+    void ExecCB() {
+        Byte op = Fetch(); Byte r = op & 0x07; Byte val = GetR8(r);
+        if (op < 0x40) {
+            switch ((op >> 3) & 7) { case 0: RLC(val); break; case 1: RRC(val); break; case 2: RL(val); break; case 3: RR(val); break; case 4: SLA(val); break; case 5: SRA(val); break; case 6: SWAP(val); break; case 7: SRL(val); break; } SetR8(r, val);
+        }
+        else {
+            int bit = (op >> 3) & 7; if (op < 0x80) BIT(bit, val); else if (op < 0xC0) { val &= ~(1 << bit); SetR8(r, val); }
+            else { val |= (1 << bit); SetR8(r, val); }
+        }
+    }
+    bool HandleInterrupts() {
+        if (reg.ime && (mmu->interruptFlag & mmu->interruptEnable)) {
+            Byte fired = mmu->interruptFlag & mmu->interruptEnable;
+            int bit = 0;
+            if (fired & 0x01) bit = 0;
+            else if (fired & 0x02) bit = 1;
+            else if (fired & 0x04) bit = 2;
+            else if (fired & 0x08) bit = 3;
+            else if (fired & 0x10) bit = 4;
+            else return false;
+            reg.ime = false;
+            mmu->interruptFlag &= ~(1 << bit);
+            Push(reg.pc);
+            reg.pc = 0x0040 + (bit * 8);
+            currentCycles += 20;
+            halted = false;
+            return true;
+        }
+        return false;
+    }
+    int Step() {
+        if (reg.imeDelay > 0) { reg.imeDelay--; if (reg.imeDelay == 0) reg.ime = true; }
+        if (HandleInterrupts()) return currentCycles;
+        if (halted) {
+            currentCycles = 4;
+            if (mmu->interruptFlag & mmu->interruptEnable) { halted = false; if (!reg.ime) haltBugTriggered = true; }
+            return currentCycles;
+        }
+        currentCycles = 0; Byte op = Fetch();
+        if ((op & 0xC0) == 0x40) { if (op == 0x76) halted = true; else SetR8((op >> 3) & 7, GetR8(op & 7)); }
+        else if ((op & 0xC0) == 0x80) { Byte v = GetR8(op & 7); switch ((op >> 3) & 7) { case 0: ALU_ADD(v); break; case 1: ALU_ADC(v); break; case 2: ALU_SUB(v); break; case 3: ALU_SBC(v); break; case 4: ALU_AND(v); break; case 5: ALU_XOR(v); break; case 6: ALU_OR(v); break; case 7: ALU_CP(v); break; } }
+        else {
+            switch (op) {
+            case 0x00: break; case 0x01: SetR16(0, Fetch16()); break; case 0x02: Write(reg.bc.bc, reg.af.a); break; case 0x03: SetR16(0, GetR16(0) + 1); break;
+            case 0x04: { Byte v = GetR8(0); ALU_INC(v); SetR8(0, v); } break; case 0x05: { Byte v = GetR8(0); ALU_DEC(v); SetR8(0, v); } break; case 0x06: SetR8(0, Fetch()); break; case 0x07: RLC(reg.af.a); F_Z(0); break;
+            case 0x08: { Word a = Fetch16(); Write(a, reg.sp & 0xFF); Write(a + 1, reg.sp >> 8); } break; case 0x09: { Word v = GetR16(0); Word hl = reg.hl.hl; int r = hl + v; F_N(0); F_H((hl & 0xFFF) + (v & 0xFFF) > 0xFFF); F_C(r > 0xFFFF); reg.hl.hl = (Word)r; } break;
+            case 0x0A: reg.af.a = Read(reg.bc.bc); break; case 0x0B: SetR16(0, GetR16(0) - 1); break; case 0x0C: { Byte v = GetR8(1); ALU_INC(v); SetR8(1, v); } break; case 0x0D: { Byte v = GetR8(1); ALU_DEC(v); SetR8(1, v); } break; case 0x0E: SetR8(1, Fetch()); break; case 0x0F: RRC(reg.af.a); F_Z(0); break;
+            case 0x10: Fetch(); halted = true; break; case 0x11: SetR16(1, Fetch16()); break; case 0x12: Write(reg.de.de, reg.af.a); break; case 0x13: SetR16(1, GetR16(1) + 1); break;
+            case 0x14: { Byte v = GetR8(2); ALU_INC(v); SetR8(2, v); } break; case 0x15: { Byte v = GetR8(2); ALU_DEC(v); SetR8(2, v); } break; case 0x16: SetR8(2, Fetch()); break; case 0x17: RL(reg.af.a); F_Z(0); break;
+            case 0x18: { SignedByte r = (SignedByte)Fetch(); reg.pc += r; } break; case 0x19: { Word v = GetR16(1); Word hl = reg.hl.hl; int r = hl + v; F_N(0); F_H((hl & 0xFFF) + (v & 0xFFF) > 0xFFF); F_C(r > 0xFFFF); reg.hl.hl = (Word)r; } break;
+            case 0x1A: reg.af.a = Read(reg.de.de); break; case 0x1B: SetR16(1, GetR16(1) - 1); break; case 0x1C: { Byte v = GetR8(3); ALU_INC(v); SetR8(3, v); } break; case 0x1D: { Byte v = GetR8(3); ALU_DEC(v); SetR8(3, v); } break; case 0x1E: SetR8(3, Fetch()); break; case 0x1F: RR(reg.af.a); F_Z(0); break;
+            case 0x20: { SignedByte r = (SignedByte)Fetch(); if (!IsZ()) reg.pc += r; } break; case 0x21: SetR16(2, Fetch16()); break; case 0x22: Write(reg.hl.hl++, reg.af.a); break; case 0x23: SetR16(2, GetR16(2) + 1); break;
+            case 0x24: { Byte v = GetR8(4); ALU_INC(v); SetR8(4, v); } break; case 0x25: { Byte v = GetR8(4); ALU_DEC(v); SetR8(4, v); } break; case 0x26: SetR8(4, Fetch()); break; case 0x27: { int a = reg.af.a; if (!(reg.af.f & 0x40)) { if ((reg.af.f & 0x10) || a > 0x99) { a += 0x60; F_C(1); }if ((reg.af.f & 0x20) || (a & 0xF) > 9)a += 6; } else { if (reg.af.f & 0x10)a -= 0x60; if (reg.af.f & 0x20)a -= 6; } F_Z((a & 0xFF) == 0); F_H(0); reg.af.a = a; } break;
+            case 0x28: { SignedByte r = (SignedByte)Fetch(); if (IsZ()) reg.pc += r; } break; case 0x29: { Word v = GetR16(2); Word hl = reg.hl.hl; int r = hl + v; F_N(0); F_H((hl & 0xFFF) + (v & 0xFFF) > 0xFFF); F_C(r > 0xFFFF); reg.hl.hl = (Word)r; } break;
+            case 0x2A: reg.af.a = Read(reg.hl.hl++); break; case 0x2B: SetR16(2, GetR16(2) - 1); break; case 0x2C: { Byte v = GetR8(5); ALU_INC(v); SetR8(5, v); } break; case 0x2D: { Byte v = GetR8(5); ALU_DEC(v); SetR8(5, v); } break; case 0x2E: SetR8(5, Fetch()); break; case 0x2F: reg.af.a ^= 0xFF; F_N(1); F_H(1); break;
+            case 0x30: { SignedByte r = (SignedByte)Fetch(); if (!IsC()) reg.pc += r; } break; case 0x31: SetR16(3, Fetch16(), false); break; case 0x32: Write(reg.hl.hl--, reg.af.a); break; case 0x33: SetR16(3, GetR16(3, false) + 1, false); break;
+            case 0x34: { Byte v = Read(reg.hl.hl); ALU_INC(v); Write(reg.hl.hl, v); } break; case 0x35: { Byte v = Read(reg.hl.hl); ALU_DEC(v); Write(reg.hl.hl, v); } break; case 0x36: Write(reg.hl.hl, Fetch()); break; case 0x37: F_N(0); F_H(0); F_C(1); break;
+            case 0x38: { SignedByte r = (SignedByte)Fetch(); if (IsC()) reg.pc += r; } break; case 0x39: { Word v = GetR16(3, false); Word hl = reg.hl.hl; int r = hl + v; F_N(0); F_H((hl & 0xFFF) + (v & 0xFFF) > 0xFFF); F_C(r > 0xFFFF); reg.hl.hl = (Word)r; } break;
+            case 0x3A: reg.af.a = Read(reg.hl.hl--); break; case 0x3B: SetR16(3, GetR16(3, false) - 1, false); break; case 0x3C: { Byte v = reg.af.a; ALU_INC(v); reg.af.a = v; } break; case 0x3D: { Byte v = reg.af.a; ALU_DEC(v); reg.af.a = v; } break; case 0x3E: reg.af.a = Fetch(); break; case 0x3F: F_N(0); F_H(0); F_C(!IsC()); break;
+            case 0xC0: if (!IsZ()) reg.pc = Pop(); else currentCycles -= 4; break; case 0xC1: SetR16(0, Pop()); break; case 0xC2: { Word a = Fetch16(); if (!IsZ()) reg.pc = a; } break; case 0xC3: reg.pc = Fetch16(); break;
+            case 0xC4: { Word a = Fetch16(); if (!IsZ()) Push(reg.pc), reg.pc = a; } break; case 0xC5: Push(reg.bc.bc); break; case 0xC6: ALU_ADD(Fetch()); break; case 0xC7: Push(reg.pc); reg.pc = 0x00; break;
+            case 0xC8: if (IsZ()) reg.pc = Pop(); else currentCycles -= 4; break; case 0xC9: reg.pc = Pop(); break; case 0xCA: { Word a = Fetch16(); if (IsZ()) reg.pc = a; } break; case 0xCB: ExecCB(); break;
+            case 0xCC: { Word a = Fetch16(); if (IsZ()) Push(reg.pc), reg.pc = a; } break; case 0xCD: { Word a = Fetch16(); Push(reg.pc); reg.pc = a; } break; case 0xCE: ALU_ADC(Fetch()); break; case 0xCF: Push(reg.pc); reg.pc = 0x08; break;
+            case 0xD0: if (!IsC()) reg.pc = Pop(); else currentCycles -= 4; break; case 0xD1: SetR16(1, Pop()); break; case 0xD2: { Word a = Fetch16(); if (!IsC()) reg.pc = a; } break; case 0xD4: { Word a = Fetch16(); if (!IsC()) Push(reg.pc), reg.pc = a; } break;
+            case 0xD5: Push(reg.de.de); break; case 0xD6: ALU_SUB(Fetch()); break; case 0xD7: Push(reg.pc); reg.pc = 0x10; break; case 0xD8: if (IsC()) reg.pc = Pop(); else currentCycles -= 4; break;
+            case 0xD9: reg.pc = Pop(); reg.imeDelay = 2; break; case 0xDA: { Word a = Fetch16(); if (IsC()) reg.pc = a; } break; case 0xDC: { Word a = Fetch16(); if (IsC()) Push(reg.pc), reg.pc = a; } break; case 0xDE: ALU_SBC(Fetch()); break; case 0xDF: Push(reg.pc); reg.pc = 0x18; break;
+            case 0xE0: Write(0xFF00 | Fetch(), reg.af.a); break; case 0xE1: SetR16(2, Pop()); break; case 0xE2: Write(0xFF00 | reg.bc.c, reg.af.a); break; case 0xE5: Push(reg.hl.hl); break;
+            case 0xE6: ALU_AND(Fetch()); break; case 0xE7: Push(reg.pc); reg.pc = 0x20; break; case 0xE8: { SignedByte r = (SignedByte)Fetch(); Word sp = reg.sp; int res = sp + r; F_Z(0); F_N(0); F_H((sp & 0xF) + (r & 0xF) > 0xF); F_C((sp & 0xFF) + (r & 0xFF) > 0xFF); reg.sp = (Word)res; } break;
+            case 0xE9: reg.pc = reg.hl.hl; break; case 0xEA: Write(Fetch16(), reg.af.a); break; case 0xEE: ALU_XOR(Fetch()); break; case 0xEF: Push(reg.pc); reg.pc = 0x28; break;
+            case 0xF0: reg.af.a = Read(0xFF00 | Fetch()); break; case 0xF1: SetR16(3, Pop(), true); break; case 0xF2: reg.af.a = Read(0xFF00 | reg.bc.c); break; case 0xF3: reg.ime = false; break;
+            case 0xF5: Push(reg.af.af); break; case 0xF6: ALU_OR(Fetch()); break; case 0xF7: Push(reg.pc); reg.pc = 0x30; break; case 0xF8: { SignedByte r = (SignedByte)Fetch(); Word sp = reg.sp; int res = sp + r; F_Z(0); F_N(0); F_H((sp & 0xF) + (r & 0xF) > 0xF); F_C((sp & 0xFF) + (r & 0xFF) > 0xFF); reg.hl.hl = (Word)res; } break;
+            case 0xF9: reg.sp = reg.hl.hl; break; case 0xFA: reg.af.a = Read(Fetch16()); break; case 0xFB: reg.imeDelay = 2; break; case 0xFE: ALU_CP(Fetch()); break; case 0xFF: Push(reg.pc); reg.pc = 0x38; break;
+            }
+        }
+        return currentCycles;
+    }
 };
-
 // -----------------------------------------------------------------------------
 // GameBoyCore
 // -----------------------------------------------------------------------------
@@ -733,21 +748,18 @@ public:
     std::vector<uint32_t> displayBuffer;
     bool isRomLoaded;
     std::wstring m_savePath;
-
     GameBoyCore() : cpu(&mmu), ppu(&mmu), isRomLoaded(false) {
         displayBuffer.resize(GB_WIDTH * GB_HEIGHT);
         ppu.SetScreenBuffer(displayBuffer.data());
         mmu.SetAPU(&apu);
         Reset(false);
     }
-
     void Reset(bool loaded) {
         mmu.Reset();
         cpu.Reset();
         ppu.Reset();
         apu.Reset();
         isRomLoaded = loaded;
-
         if (!isRomLoaded) {
             SetupTestRender();
         }
@@ -756,7 +768,6 @@ public:
             mmu.io[0x47] = 0xE4;
         }
     }
-
     void SetupTestRender() {
         if (mmu.rom.size() < 0x200) mmu.rom.resize(0x200, 0);
         mmu.io[0x40] = 0x91;
@@ -764,22 +775,18 @@ public:
         for (int i = 0; i < 0x1800; i++) mmu.vram[i] = (i % 2 == 0) ? 0xFF : 0x00;
         mmu.rom[0x0100] = 0x00; mmu.rom[0x0101] = 0xC3; mmu.rom[0x0102] = 0x00; mmu.rom[0x0103] = 0x01;
     }
-
     bool LoadRom(const std::wstring& path) {
         FILE* fp = NULL;
         _wfopen_s(&fp, path.c_str(), L"rb");
         if (!fp) return false;
-
         fseek(fp, 0, SEEK_END);
         long size = ftell(fp);
         fseek(fp, 0, SEEK_SET);
-
         std::vector<Byte> buffer(size);
         if (fread(buffer.data(), 1, size, fp) == size) {
             fclose(fp);
             Reset(true);
             mmu.LoadRomData(buffer);
-
             m_savePath = path;
             size_t dotPos = m_savePath.find_last_of(L'.');
             if (dotPos != std::string::npos) {
@@ -787,36 +794,29 @@ public:
             }
             m_savePath += L".sav";
             mmu.LoadRAM(m_savePath);
-
             return true;
         }
         fclose(fp);
         return false;
     }
-
     void SaveRAM() {
         if (isRomLoaded && !m_savePath.empty()) {
             mmu.SaveRAM(m_savePath);
         }
     }
-
     std::string GetTitle() {
         return mmu.GetTitle() + " (" + mmu.GetMBCName() + ")";
     }
-
     void StepFrame() {
         const int CYCLES_PER_FRAME = 70224;
         int cyclesThisFrame = 0;
-
         apu.buffer.clear();
-
         while (cyclesThisFrame < CYCLES_PER_FRAME) {
             int cycles = cpu.Step();
             ppu.Step(cycles);
             mmu.UpdateRTC();
             mmu.UpdateTimers(cycles);
             apu.Step(cycles);
-
             cyclesThisFrame += cycles;
         }
     }
@@ -824,7 +824,6 @@ public:
     void InputKey(int key, bool pressed) { mmu.SetKey(key, pressed); }
     const std::vector<int16_t>& GetAudioSamples() { return apu.buffer; }
 };
-
 // -----------------------------------------------------------------------------
 // App Class
 // -----------------------------------------------------------------------------
@@ -837,39 +836,33 @@ private:
     ID2D1Bitmap* m_pBitmap;
     GameBoyCore m_gbCore;
     AudioDriver m_audio;
-
 public:
     App() : m_hwnd(NULL), m_pDirect2dFactory(NULL), m_pRenderTarget(NULL), m_pBitmap(NULL) {}
     ~App() {
         m_gbCore.SaveRAM();
         SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); SafeRelease(&m_pDirect2dFactory);
     }
-
     HRESULT Initialize(HINSTANCE hInstance, int nCmdShow) {
         D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &m_pDirect2dFactory);
         WNDCLASSEX wcex = { sizeof(WNDCLASSEX) };
         wcex.style = CS_HREDRAW | CS_VREDRAW;
         wcex.lpfnWndProc = App::WndProc;
-        wcex.cbClsExtra = 0;
         wcex.cbWndExtra = sizeof(LONG_PTR);
         wcex.hInstance = hInstance;
         wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
         wcex.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
         wcex.lpszClassName = L"D2DGameBoyWnd";
         RegisterClassEx(&wcex);
-
         HMENU hMenu = CreateMenu();
         HMENU hSubMenu = CreatePopupMenu();
         AppendMenu(hSubMenu, MF_STRING, IDM_FILE_OPEN, L"Open ROM...");
         AppendMenu(hSubMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hSubMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenu(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSubMenu, L"File");
-
-        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator (D2D + DS + Save)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, GB_WIDTH * 4, GB_HEIGHT * 4, NULL, hMenu, hInstance, this);
+        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, GB_WIDTH * 4, GB_HEIGHT * 4, NULL, hMenu, hInstance, this);
         if (m_hwnd) {
             ShowWindow(m_hwnd, nCmdShow);
             UpdateWindow(m_hwnd);
-
             if (!m_audio.Initialize(m_hwnd)) {
                 MessageBox(m_hwnd, L"DirectSound Init Failed", L"Error", MB_OK);
             }
@@ -877,7 +870,6 @@ public:
         }
         return E_FAIL;
     }
-
     void RunMessageLoop() {
         MSG msg;
         while (true) {
@@ -888,7 +880,6 @@ public:
             else {
                 const int BYTES_PER_FRAME = (SAMPLE_RATE / 60) * 2 * sizeof(int16_t);
                 int freeSpace = m_audio.GetBufferFreeSpace();
-
                 if (freeSpace > BYTES_PER_FRAME) {
                     m_gbCore.StepFrame();
                     m_audio.PushSamples(m_gbCore.GetAudioSamples());
@@ -900,10 +891,8 @@ public:
             }
         }
     }
-
     void PauseAudio() { m_audio.Pause(); }
     void ResumeAudio() { m_audio.Resume(); }
-
 private:
     void OnFileOpen() {
         OPENFILENAME ofn; wchar_t szFile[260] = { 0 };
@@ -911,12 +900,9 @@ private:
         ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = m_hwnd; ofn.lpstrFile = szFile; ofn.nMaxFile = sizeof(szFile);
         ofn.lpstrFilter = L"GameBoy ROMs\0*.gb;*.gbc\0All Files\0*.*\0"; ofn.nFilterIndex = 1;
         ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
-
         PauseAudio();
-
         if (GetOpenFileName(&ofn) == TRUE) {
             m_gbCore.SaveRAM();
-
             if (m_gbCore.LoadRom(szFile)) {
                 std::string titleStr = m_gbCore.GetTitle();
                 std::wstring wTitle(titleStr.begin(), titleStr.end());
@@ -927,10 +913,8 @@ private:
                 MessageBox(m_hwnd, L"Failed to load ROM file.", L"Error", MB_OK | MB_ICONERROR);
             }
         }
-
         ResumeAudio();
     }
-
     HRESULT CreateDeviceResources() {
         if (!m_pRenderTarget) {
             RECT rc; GetClientRect(m_hwnd, &rc);
@@ -945,7 +929,6 @@ private:
         }
         return S_OK;
     }
-
     void OnRender() {
         CreateDeviceResources();
         if (m_pRenderTarget && !(m_pRenderTarget->CheckWindowState() & D2D1_WINDOW_STATE_OCCLUDED)) {
@@ -959,7 +942,6 @@ private:
             if (m_pRenderTarget->EndDraw() == D2DERR_RECREATE_TARGET) { SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); }
         }
     }
-
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
         App* pApp = reinterpret_cast<App*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
         switch (message) {
@@ -980,22 +962,18 @@ private:
                 if (key != -1) pApp->m_gbCore.InputKey(key, pressed);
             }
             return 0;
-
         case WM_ENTERMENULOOP:
         case WM_ENTERSIZEMOVE:
             if (pApp) pApp->PauseAudio();
             return 0;
-
         case WM_EXITMENULOOP:
         case WM_EXITSIZEMOVE:
             if (pApp) pApp->ResumeAudio();
             return 0;
-
         case WM_CLOSE:
             if (pApp) pApp->m_gbCore.SaveRAM();
             DestroyWindow(hwnd);
             return 0;
-
         case WM_DESTROY:
             if (pApp) pApp->m_gbCore.SaveRAM();
             PostQuitMessage(0);
@@ -1004,7 +982,6 @@ private:
         return DefWindowProc(hwnd, message, wParam, lParam);
     }
 };
-
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     CoInitialize(NULL);
     App app;

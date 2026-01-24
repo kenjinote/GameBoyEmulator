@@ -26,6 +26,7 @@ const int GB_HEIGHT = 144;
 const int SAMPLE_RATE = 44100;
 #define IDM_FILE_OPEN 1001
 #define IDM_FILE_EXIT 1002
+#define IDM_FILE_FULLSCREEN 1003
 template <class T> void SafeRelease(T** ppT) {
     if (*ppT) { (*ppT)->Release(); *ppT = NULL; }
 }
@@ -66,7 +67,7 @@ public:
         wfx.nBlockAlign = 4;
         wfx.nAvgBytesPerSec = SAMPLE_RATE * 4;
         if (FAILED(m_pPrimary->SetFormat(&wfx))) return false;
-        m_bufferSize = wfx.nAvgBytesPerSec / 10;
+        m_bufferSize = wfx.nAvgBytesPerSec / 4;
         dsbd.dwFlags = DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLVOLUME;
         dsbd.dwBufferBytes = m_bufferSize;
         dsbd.lpwfxFormat = &wfx;
@@ -93,7 +94,7 @@ public:
         int freeSpace = 0;
         if ((int)play > m_nextWriteOffset) freeSpace = (int)play - m_nextWriteOffset;
         else freeSpace = m_bufferSize - (m_nextWriteOffset - (int)play);
-        int safety = 1024;
+        int safety = 2048;
         if (freeSpace > safety) freeSpace -= safety; else freeSpace = 0;
         return freeSpace;
     }
@@ -124,7 +125,7 @@ public:
     struct Sweep { int period; int timer; bool enabled; int shadowFreq; };
     struct Channel { bool enabled; int lengthCounter; int envelopeVolume; int envelopeTimer; int freqTimer; int dutyPos; int period; Sweep sweep; } ch1, ch2, ch3, ch4;
     int frameSequencer;
-    float accL; float accR; int accCount;
+    double accL; double accR; double accCount;
     const int CLOCK_RATE = 4194304;
     std::vector<int16_t> buffer;
     const int dutyPatterns[4][8] = { {0,0,0,0,0,0,0,1}, {1,0,0,0,0,0,0,1}, {1,0,0,0,0,1,1,1}, {0,1,1,1,1,1,1,0} };
@@ -233,8 +234,16 @@ public:
         if (nr51 & 0x04) r += s3; if (nr51 & 0x40) l += s3; if (nr51 & 0x08) r += s4; if (nr51 & 0x80) l += s4;
         Byte nr50 = regs[0x24]; int volL = (nr50 >> 4) & 7; int volR = nr50 & 7; l = l * (volL + 1); r = r * (volR + 1);
         accL += l * cycles; accR += r * cycles; accCount += cycles;
-        const int CYCLES_PER_SAMPLE = CLOCK_RATE / SAMPLE_RATE;
-        while (accCount >= CYCLES_PER_SAMPLE) { buffer.push_back((int16_t)((accL / CYCLES_PER_SAMPLE) * 64)); buffer.push_back((int16_t)((accR / CYCLES_PER_SAMPLE) * 64)); accL -= (int)(accL / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE; accR -= (int)(accR / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE; accCount -= CYCLES_PER_SAMPLE; }
+        const double CYCLES_PER_SAMPLE = (double)CLOCK_RATE / (double)SAMPLE_RATE;
+        while (accCount >= CYCLES_PER_SAMPLE) {
+            int16_t outL = (int16_t)((accL / CYCLES_PER_SAMPLE) * 30);
+            int16_t outR = (int16_t)((accR / CYCLES_PER_SAMPLE) * 30);
+            buffer.push_back(outL);
+            buffer.push_back(outR);
+            accL -= (int)(accL / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE;
+            accR -= (int)(accR / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE;
+            accCount -= CYCLES_PER_SAMPLE;
+        }
     }
 };
 // -----------------------------------------------------------------------------
@@ -864,6 +873,7 @@ public:
         HMENU hMenu = CreateMenu();
         HMENU hSubMenu = CreatePopupMenu();
         AppendMenu(hSubMenu, MF_STRING, IDM_FILE_OPEN, L"Open ROM...");
+        AppendMenu(hSubMenu, MF_STRING, IDM_FILE_FULLSCREEN, L"Fullscreen\tF11");
         AppendMenu(hSubMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hSubMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
         AppendMenu(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSubMenu, L"File");
@@ -920,6 +930,7 @@ public:
             SetWindowPlacement(m_hwnd, &m_wpPrev);
             SetWindowPos(m_hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
             SetMenu(m_hwnd, m_hMenu);
+            CheckMenuItem(m_hMenu, IDM_FILE_FULLSCREEN, MF_UNCHECKED);
             m_isFullscreen = FALSE;
         }
         else {
@@ -927,6 +938,7 @@ public:
             GetWindowPlacement(m_hwnd, &m_wpPrev);
             DWORD dwNewStyle = dwStyle & ~WS_OVERLAPPEDWINDOW;
             SetWindowLong(m_hwnd, GWL_STYLE, dwNewStyle);
+            CheckMenuItem(m_hMenu, IDM_FILE_FULLSCREEN, MF_CHECKED);
             SetMenu(m_hwnd, NULL);
             HMONITOR hMonitor = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTOPRIMARY);
             MONITORINFO mi = { sizeof(MONITORINFO) };
@@ -1049,6 +1061,7 @@ private:
         case WM_COMMAND:
             if (LOWORD(wParam) == IDM_FILE_OPEN && pApp) pApp->OnFileOpen();
             if (LOWORD(wParam) == IDM_FILE_EXIT) DestroyWindow(hwnd);
+            if (LOWORD(wParam) == IDM_FILE_FULLSCREEN && pApp) pApp->ToggleFullscreen();
             return 0;
         case WM_SIZE: if (pApp && pApp->m_pRenderTarget) pApp->m_pRenderTarget->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam))); return 0;
         case WM_KEYDOWN: case WM_KEYUP:

@@ -1,5 +1,4 @@
-﻿#define _CRT_SECURE_NO_WARNINGS
-#include <windows.h>
+﻿#include <windows.h>
 #include <commdlg.h>
 #include <shellapi.h>
 #include <d2d1.h>
@@ -18,135 +17,76 @@
 #pragma comment(lib, "dxguid")
 #pragma comment(lib, "winmm")
 #pragma comment(lib, "ole32")
-using Byte = uint8_t;
-using Word = uint16_t;
-using SignedByte = int8_t;
-const int GB_WIDTH = 160;
-const int GB_HEIGHT = 144;
-const int SAMPLE_RATE = 44100;
+using Byte = uint8_t; using Word = uint16_t; using SignedByte = int8_t;
+const int GB_WIDTH = 160; const int GB_HEIGHT = 144; const int SAMPLE_RATE = 44100;
 #define IDM_FILE_OPEN 1001
 #define IDM_FILE_EXIT 1002
 #define IDM_FILE_FULLSCREEN 1003
-template <class T> void SafeRelease(T** ppT) {
-    if (*ppT) { (*ppT)->Release(); *ppT = NULL; }
-}
-// 前方宣言
-class APU;
-class MMU;
-class PPU;
-class CPU;
-class GameBoyCore;
-// -----------------------------------------------------------------------------
-// AudioDriver
-// -----------------------------------------------------------------------------
+template <class T> void SafeRelease(T** ppT) { if (*ppT) { (*ppT)->Release(); *ppT = NULL; } }
+class APU; class MMU; class PPU; class CPU; class GameBoyCore;
 class AudioDriver {
-    IDirectSound8* m_pDS;
-    IDirectSoundBuffer* m_pPrimary;
-    IDirectSoundBuffer* m_pSecondary;
-    int m_bufferSize;
-    int m_nextWriteOffset;
+    IDirectSound8* m_pDS; IDirectSoundBuffer* m_pPrimary; IDirectSoundBuffer* m_pSecondary;
+    int m_bufferSize; int m_nextWriteOffset;
 public:
     AudioDriver() : m_pDS(NULL), m_pPrimary(NULL), m_pSecondary(NULL), m_bufferSize(0), m_nextWriteOffset(0) {}
-    ~AudioDriver() {
-        SafeRelease(&m_pSecondary);
-        SafeRelease(&m_pPrimary);
-        SafeRelease(&m_pDS);
-    }
+    ~AudioDriver() { SafeRelease(&m_pSecondary); SafeRelease(&m_pPrimary); SafeRelease(&m_pDS); }
     bool Initialize(HWND hwnd) {
         if (FAILED(DirectSoundCreate8(NULL, &m_pDS, NULL))) return false;
         if (FAILED(m_pDS->SetCooperativeLevel(hwnd, DSSCL_PRIORITY))) return false;
-        DSBUFFERDESC dsbd = { 0 };
-        dsbd.dwSize = sizeof(DSBUFFERDESC);
-        dsbd.dwFlags = DSBCAPS_PRIMARYBUFFER;
+        DSBUFFERDESC dsbd = { 0 }; dsbd.dwSize = sizeof(DSBUFFERDESC); dsbd.dwFlags = DSBCAPS_PRIMARYBUFFER;
         if (FAILED(m_pDS->CreateSoundBuffer(&dsbd, &m_pPrimary, NULL))) return false;
-        WAVEFORMATEX wfx = { 0 };
-        wfx.wFormatTag = WAVE_FORMAT_PCM;
-        wfx.nChannels = 2;
-        wfx.nSamplesPerSec = SAMPLE_RATE;
-        wfx.wBitsPerSample = 16;
-        wfx.nBlockAlign = 4;
-        wfx.nAvgBytesPerSec = SAMPLE_RATE * 4;
+        WAVEFORMATEX wfx = { 0 }; wfx.wFormatTag = WAVE_FORMAT_PCM; wfx.nChannels = 2; wfx.nSamplesPerSec = SAMPLE_RATE;
+        wfx.wBitsPerSample = 16; wfx.nBlockAlign = 4; wfx.nAvgBytesPerSec = SAMPLE_RATE * 4;
         if (FAILED(m_pPrimary->SetFormat(&wfx))) return false;
         m_bufferSize = wfx.nAvgBytesPerSec / 4;
         dsbd.dwFlags = DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLVOLUME;
-        dsbd.dwBufferBytes = m_bufferSize;
-        dsbd.lpwfxFormat = &wfx;
+        dsbd.dwBufferBytes = m_bufferSize; dsbd.lpwfxFormat = &wfx;
         if (FAILED(m_pDS->CreateSoundBuffer(&dsbd, &m_pSecondary, NULL))) return false;
-        ClearBuffer();
-        m_pSecondary->Play(0, 0, DSBPLAY_LOOPING);
-        return true;
+        ClearBuffer(); m_pSecondary->Play(0, 0, DSBPLAY_LOOPING); return true;
     }
     void ClearBuffer() {
         void* p1, * p2; DWORD l1, l2;
         if (SUCCEEDED(m_pSecondary->Lock(0, m_bufferSize, &p1, &l1, &p2, &l2, 0))) {
-            ZeroMemory(p1, l1);
-            if (p2) ZeroMemory(p2, l2);
-            m_pSecondary->Unlock(p1, l1, p2, l2);
+            ZeroMemory(p1, l1); if (p2) ZeroMemory(p2, l2); m_pSecondary->Unlock(p1, l1, p2, l2);
         }
         m_nextWriteOffset = 0;
     }
     void Pause() { if (m_pSecondary) m_pSecondary->Stop(); }
     void Resume() { if (m_pSecondary) m_pSecondary->Play(0, 0, DSBPLAY_LOOPING); }
     int GetBufferFreeSpace() {
-        if (!m_pSecondary) return 0;
-        DWORD play, write;
-        m_pSecondary->GetCurrentPosition(&play, &write);
-        int freeSpace = 0;
-        if ((int)play > m_nextWriteOffset) freeSpace = (int)play - m_nextWriteOffset;
+        if (!m_pSecondary) return 0; DWORD play, write; m_pSecondary->GetCurrentPosition(&play, &write);
+        int freeSpace = 0; if ((int)play > m_nextWriteOffset) freeSpace = (int)play - m_nextWriteOffset;
         else freeSpace = m_bufferSize - (m_nextWriteOffset - (int)play);
-        int safety = 2048;
-        if (freeSpace > safety) freeSpace -= safety; else freeSpace = 0;
-        return freeSpace;
+        int safety = 2048; if (freeSpace > safety) freeSpace -= safety; else freeSpace = 0; return freeSpace;
     }
     void PushSamples(const std::vector<int16_t>& samples) {
-        if (!m_pSecondary || samples.empty()) return;
-        int size = (int)samples.size() * 2;
-        void* p1, * p2; DWORD l1, l2;
-        HRESULT hr = m_pSecondary->Lock(m_nextWriteOffset, size, &p1, &l1, &p2, &l2, 0);
-        if (hr == DSERR_BUFFERLOST) {
-            m_pSecondary->Restore();
-            hr = m_pSecondary->Lock(m_nextWriteOffset, size, &p1, &l1, &p2, &l2, 0);
-        }
+        if (!m_pSecondary || samples.empty()) return; int size = (int)samples.size() * 2;
+        void* p1, * p2; DWORD l1, l2; HRESULT hr = m_pSecondary->Lock(m_nextWriteOffset, size, &p1, &l1, &p2, &l2, 0);
+        if (hr == DSERR_BUFFERLOST) { m_pSecondary->Restore(); hr = m_pSecondary->Lock(m_nextWriteOffset, size, &p1, &l1, &p2, &l2, 0); }
         if (SUCCEEDED(hr)) {
-            memcpy(p1, samples.data(), l1);
-            if (p2) memcpy(p2, (uint8_t*)samples.data() + l1, l2);
-            m_pSecondary->Unlock(p1, l1, p2, l2);
-            m_nextWriteOffset = (m_nextWriteOffset + size) % m_bufferSize;
+            memcpy(p1, samples.data(), l1); if (p2) memcpy(p2, (uint8_t*)samples.data() + l1, l2);
+            m_pSecondary->Unlock(p1, l1, p2, l2); m_nextWriteOffset = (m_nextWriteOffset + size) % m_bufferSize;
         }
     }
 };
-// -----------------------------------------------------------------------------
-// APU
-// -----------------------------------------------------------------------------
 class APU {
 public:
-    Byte regs[0x40];
-    Byte waveRam[0x10];
+    Byte regs[0x40]; Byte waveRam[0x10];
     struct Sweep { int period; int timer; bool enabled; int shadowFreq; };
     struct Channel { bool enabled; int lengthCounter; int envelopeVolume; int envelopeTimer; int freqTimer; int dutyPos; int period; Sweep sweep; } ch1, ch2, ch3, ch4;
-    int frameSequencer;
-    double accL; double accR; double accCount;
-    const int CLOCK_RATE = 4194304;
-    std::vector<int16_t> buffer;
-    const int dutyPatterns[4][8] = { {0,0,0,0,0,0,0,1}, {1,0,0,0,0,0,0,1}, {1,0,0,0,0,1,1,1}, {0,1,1,1,1,1,1,0} };
-    uint16_t lfsr;
+    int frameSequencer; double accL, accR, accCount; const int CLOCK_RATE = 4194304; std::vector<int16_t> buffer;
+    const int dutyPatterns[4][8] = { {0,0,0,0,0,0,0,1}, {1,0,0,0,0,0,0,1}, {1,0,0,0,0,1,1,1}, {0,1,1,1,1,1,1,0} }; uint16_t lfsr;
     APU() { Reset(); }
     void Reset() {
-        memset(regs, 0, sizeof(regs)); memset(waveRam, 0, sizeof(waveRam)); buffer.clear();
-        frameSequencer = 0; accL = 0; accR = 0; accCount = 0;
-        memset(&ch1, 0, sizeof(Channel)); memset(&ch2, 0, sizeof(Channel));
-        memset(&ch3, 0, sizeof(Channel)); memset(&ch4, 0, sizeof(Channel));
+        memset(regs, 0, sizeof(regs)); memset(waveRam, 0, sizeof(waveRam)); buffer.clear(); frameSequencer = 0; accL = 0; accR = 0; accCount = 0;
+        memset(&ch1, 0, sizeof(Channel)); memset(&ch2, 0, sizeof(Channel)); memset(&ch3, 0, sizeof(Channel)); memset(&ch4, 0, sizeof(Channel));
         lfsr = 0x7FFF; regs[0x26] = 0xF1;
     }
     Byte Read(Word addr) {
         if (addr >= 0xFF30 && addr <= 0xFF3F) return waveRam[addr - 0xFF30];
         if (addr >= 0xFF10 && addr <= 0xFF3F) {
             int r = addr - 0xFF00; Byte val = regs[r];
-            if (addr == 0xFF26) {
-                val = (val & 0xF0);
-                if (ch1.enabled) val |= 0x01; if (ch2.enabled) val |= 0x02;
-                if (ch3.enabled) val |= 0x04; if (ch4.enabled) val |= 0x08;
-            }
+            if (addr == 0xFF26) { val = (val & 0xF0); if (ch1.enabled) val |= 0x01; if (ch2.enabled) val |= 0x02; if (ch3.enabled) val |= 0x04; if (ch4.enabled) val |= 0x08; }
             return val;
         }
         return 0xFF;
@@ -155,17 +95,14 @@ public:
         if (addr >= 0xFF30 && addr <= 0xFF3F) { waveRam[addr - 0xFF30] = value; return; }
         if (addr >= 0xFF10 && addr <= 0xFF3F) {
             int r = addr - 0xFF00; regs[r] = value;
-            if (r == 0x14 && (value & 0x80)) TriggerCh1();
-            if (r == 0x19 && (value & 0x80)) TriggerCh2();
-            if (r == 0x1E && (value & 0x80)) TriggerCh3();
-            if (r == 0x23 && (value & 0x80)) TriggerCh4();
+            if (r == 0x14 && (value & 0x80)) TriggerCh1(); if (r == 0x19 && (value & 0x80)) TriggerCh2();
+            if (r == 0x1E && (value & 0x80)) TriggerCh3(); if (r == 0x23 && (value & 0x80)) TriggerCh4();
             if (r == 0x26) { if (!(value & 0x80)) { Reset(); regs[0x26] = 0x00; } }
         }
     }
     int CalcNewFreq() {
         int shift = regs[0x10] & 0x07; int diff = ch1.sweep.shadowFreq >> shift;
-        int newFreq = ch1.sweep.shadowFreq; if (regs[0x10] & 0x08) newFreq -= diff; else newFreq += diff;
-        return newFreq;
+        int newFreq = ch1.sweep.shadowFreq; if (regs[0x10] & 0x08) newFreq -= diff; else newFreq += diff; return newFreq;
     }
     void TriggerCh1() {
         ch1.enabled = true; int lenVal = regs[0x11] & 0x3F; ch1.lengthCounter = lenVal ? (64 - lenVal) : 64;
@@ -173,8 +110,7 @@ public:
         ch1.period = (2048 - ((regs[0x14] & 7) << 8 | regs[0x13])) * 4; ch1.freqTimer = ch1.period;
         int sweepPeriod = (regs[0x10] >> 4) & 0x07; int sweepShift = regs[0x10] & 0x07;
         ch1.sweep.period = sweepPeriod ? sweepPeriod : 8; ch1.sweep.timer = ch1.sweep.period;
-        ch1.sweep.shadowFreq = ((regs[0x14] & 7) << 8 | regs[0x13]);
-        ch1.sweep.enabled = (sweepPeriod > 0 || sweepShift > 0);
+        ch1.sweep.shadowFreq = ((regs[0x14] & 7) << 8 | regs[0x13]); ch1.sweep.enabled = (sweepPeriod > 0 || sweepShift > 0);
         if (sweepShift > 0) { if (CalcNewFreq() > 2047) ch1.enabled = false; }
     }
     void TriggerCh2() {
@@ -209,8 +145,7 @@ public:
                             if (newFreq <= 2047 && (regs[0x10] & 0x07) > 0) {
                                 ch1.sweep.shadowFreq = newFreq; regs[0x13] = newFreq & 0xFF; regs[0x14] = (regs[0x14] & 0xF8) | ((newFreq >> 8) & 0x07);
                                 ch1.period = (2048 - newFreq) * 4; if (CalcNewFreq() > 2047) ch1.enabled = false;
-                            }
-                            else if (newFreq > 2047) ch1.enabled = false;
+                            } else if (newFreq > 2047) ch1.enabled = false;
                         }
                     }
                 }
@@ -221,7 +156,7 @@ public:
                         ch.envelopeTimer = reg & 7; if (reg & 8) { if (ch.envelopeVolume < 15) ch.envelopeVolume++; }
                         else { if (ch.envelopeVolume > 0) ch.envelopeVolume--; }
                     }
-                    };
+                };
                 DoEnv(ch1, regs[0x12]); DoEnv(ch2, regs[0x17]); DoEnv(ch4, regs[0x21]);
             }
         }
@@ -236,46 +171,17 @@ public:
         accL += l * cycles; accR += r * cycles; accCount += cycles;
         const double CYCLES_PER_SAMPLE = (double)CLOCK_RATE / (double)SAMPLE_RATE;
         while (accCount >= CYCLES_PER_SAMPLE) {
-            int16_t outL = (int16_t)((accL / CYCLES_PER_SAMPLE) * 30);
-            int16_t outR = (int16_t)((accR / CYCLES_PER_SAMPLE) * 30);
-            buffer.push_back(outL);
-            buffer.push_back(outR);
-            accL -= (int)(accL / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE;
-            accR -= (int)(accR / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE;
-            accCount -= CYCLES_PER_SAMPLE;
+            buffer.push_back((int16_t)((accL / CYCLES_PER_SAMPLE) * 30)); buffer.push_back((int16_t)((accR / CYCLES_PER_SAMPLE) * 30));
+            accL -= (int)(accL / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE; accR -= (int)(accR / CYCLES_PER_SAMPLE) * CYCLES_PER_SAMPLE; accCount -= CYCLES_PER_SAMPLE;
         }
     }
 };
-// -----------------------------------------------------------------------------
-// MMU
-// -----------------------------------------------------------------------------
-class MMU
-{
+class MMU {
 public:
-    std::vector<Byte> rom;
-    std::vector<Byte> vram;
-    std::vector<Byte> wram;
-    std::vector<Byte> hram;
-    std::vector<Byte> io;
-    std::vector<Byte> oam;
-    std::vector<Byte> sram;
-    Byte interruptFlag;
-    Byte interruptEnable;
-    int mbcType; // mbcType: 0=ROM, 1=MBC1, 2=MBC2, 3=MBC3, 4=HuC1, 5=MBC5
-    bool ramEnable;
-    bool hasBattery;
-    int romBank;
-    int ramBank;
-    int bankingMode;
-    size_t ramSizeMask;
-    int divCounter;
-    int tacCounter;
-    bool rtcMapped;
-    Byte rtcS, rtcM, rtcH, rtcDL, rtcDH, rtcLatch;
-    time_t lastTime;
-    Byte joypadButtons;
-    Byte joypadDir;
-    APU* apu;
+    std::vector<Byte> rom, vram, wram, hram, io, oam, sram;
+    Byte interruptFlag, interruptEnable, joypadButtons, joypadDir, rtcS, rtcM, rtcH, rtcDL, rtcDH, rtcLatch;
+    int mbcType, romBank, ramBank, bankingMode, divCounter, tacCounter;
+    bool ramEnable, hasBattery, rtcMapped; size_t ramSizeMask; time_t lastTime; APU* apu;
     MMU() : apu(nullptr) { Reset(); }
     void SetAPU(APU* p) { apu = p; }
     void Reset() {
@@ -283,260 +189,107 @@ public:
         if (rom.size() < 0x8000) rom.resize(0x8000, 0);
         interruptFlag = 0; interruptEnable = 0; mbcType = 0; ramEnable = false; romBank = 1; ramBank = 0; bankingMode = 0;
         divCounter = 0; tacCounter = 0; rtcMapped = false; rtcS = rtcM = rtcH = rtcDL = rtcDH = rtcLatch = 0; lastTime = time(NULL);
-        joypadButtons = 0x0F; joypadDir = 0x0F; hasBattery = false;
-        ramSizeMask = 0;
+        joypadButtons = 0x0F; joypadDir = 0x0F; hasBattery = false; ramSizeMask = 0;
     }
     void LoadRomData(const std::vector<Byte>& data) {
-        rom = data;
-        if (rom.size() < 0x8000) rom.resize(0x8000, 0);
-        if (sram.size() < 0x20000) sram.resize(0x20000, 0);
-        std::fill(sram.begin(), sram.end(), 0);
-        Byte type = rom[0x0147];
-        if (type == 0x05 || type == 0x06) mbcType = 2; // MBC2
-        else if (type >= 0x0F && type <= 0x13) mbcType = 3; // MBC3
-        else if (type >= 0x01 && type <= 0x03) mbcType = 1; // MBC1
-        else if (type >= 0x19 && type <= 0x1E) mbcType = 5; // MBC5
-        else if (type == 0xFF) mbcType = 4; // HuC1
-        else mbcType = 0;
+        rom = data; if (rom.size() < 0x8000) rom.resize(0x8000, 0); if (sram.size() < 0x20000) sram.resize(0x20000, 0);
+        std::fill(sram.begin(), sram.end(), 0); Byte type = rom[0x0147];
+        if (type == 0x05 || type == 0x06) mbcType = 2; else if (type >= 0x0F && type <= 0x13) mbcType = 3;
+        else if (type >= 0x01 && type <= 0x03) mbcType = 1; else if (type >= 0x19 && type <= 0x1E) mbcType = 5; else if (type == 0xFF) mbcType = 4; else mbcType = 0;
         hasBattery = (type == 0x03 || type == 0x06 || type == 0x09 || type == 0x0F || type == 0x10 || type == 0x13 || type == 0x1B || type == 0x1E || type == 0xFF);
-        ramEnable = false; romBank = 1; ramBank = 0; bankingMode = 0; rtcMapped = false;
-        Byte ramSizeCode = rom[0x0149];
-        switch (ramSizeCode) {
-        case 0x00: ramSizeMask = 0; break;          // No RAM
-        case 0x01: ramSizeMask = 0x07FF; break;     // 2KB
-        case 0x02: ramSizeMask = 0x1FFF; break;     // 8KB (SaGa2など)
-        case 0x03: ramSizeMask = 0x7FFF; break;     // 32KB
-        case 0x04: ramSizeMask = 0x1FFFF; break;    // 128KB
-        case 0x05: ramSizeMask = 0xFFFF; break;     // 64KB
-        default:   ramSizeMask = 0; break;
-        }
+        ramEnable = false; romBank = 1; ramBank = 0; bankingMode = 0; rtcMapped = false; Byte ramSizeCode = rom[0x0149];
+        switch (ramSizeCode) { case 0x01: ramSizeMask = 0x07FF; break; case 0x02: ramSizeMask = 0x1FFF; break; case 0x03: ramSizeMask = 0x7FFF; break; case 0x04: ramSizeMask = 0x1FFFF; break; case 0x05: ramSizeMask = 0xFFFF; break; default: ramSizeMask = 0; break; }
         if (mbcType == 2) ramSizeMask = 0x1FF;
     }
     void LoadRAM(const std::wstring& path) {
-        if (!hasBattery) return;
-        FILE* fp = NULL;
-        _wfopen_s(&fp, path.c_str(), L"rb");
-        if (fp) {
-            fseek(fp, 0, SEEK_END);
-            long fileSize = ftell(fp);
-            fseek(fp, 0, SEEK_SET);
-            if (fileSize > 0) {
-                if (fileSize > (long)sram.size()) sram.resize(fileSize);
-                fread(sram.data(), 1, fileSize, fp);
-            }
-            fclose(fp);
-        }
+        if (!hasBattery) return; FILE* fp = NULL; _wfopen_s(&fp, path.c_str(), L"rb");
+        if (fp) { fseek(fp, 0, SEEK_END); long fileSize = ftell(fp); fseek(fp, 0, SEEK_SET); if (fileSize > 0) { if (fileSize > (long)sram.size()) sram.resize(fileSize); fread(sram.data(), 1, fileSize, fp); } fclose(fp); }
     }
     void SaveRAM(const std::wstring& path) {
-        if (!hasBattery) return;
-        size_t saveSize = ramSizeMask + 1;
-        if (saveSize <= 1) return;
-        if (saveSize > sram.size()) saveSize = sram.size();
-        FILE* fp = NULL;
-        _wfopen_s(&fp, path.c_str(), L"wb");
-        if (fp) {
-            fwrite(sram.data(), 1, saveSize, fp);
-            fclose(fp);
-        }
+        if (!hasBattery) return; size_t saveSize = ramSizeMask + 1; if (saveSize <= 1) return; if (saveSize > sram.size()) saveSize = sram.size();
+        FILE* fp = NULL; _wfopen_s(&fp, path.c_str(), L"wb"); if (fp) { fwrite(sram.data(), 1, saveSize, fp); fclose(fp); }
     }
     void RequestInterrupt(int bit) { interruptFlag |= (1 << bit); }
-    void DoDMA(Byte value) {
-        Word srcBase = value << 8; for (int i = 0; i < 0xA0; i++) oam[i] = Read(srcBase + i);
-    }
+    void DoDMA(Byte value) { Word srcBase = value << 8; for (int i = 0; i < 0xA0; i++) oam[i] = Read(srcBase + i); }
     void UpdateRTC() {
-        if (mbcType != 3) return;
-        time_t now = time(NULL);
-        if (now > lastTime) {
-            lastTime = now;
-            if (!(rtcDH & 0x40)) {
-                rtcS++; if (rtcS >= 60) { rtcS = 0; rtcM++; } if (rtcM >= 60) { rtcM = 0; rtcH++; } if (rtcH >= 24) { rtcH = 0; rtcDL++; if (rtcDL == 0) rtcDH |= 1; }
-            }
-        }
+        if (mbcType != 3) return; time_t now = time(NULL);
+        if (now > lastTime) { lastTime = now; if (!(rtcDH & 0x40)) { rtcS++; if (rtcS >= 60) { rtcS = 0; rtcM++; } if (rtcM >= 60) { rtcM = 0; rtcH++; } if (rtcH >= 24) { rtcH = 0; rtcDL++; if (rtcDL == 0) rtcDH |= 1; } } }
     }
     void UpdateTimers(int cycles) {
         divCounter += cycles; while (divCounter >= 256) { io[0x04]++; divCounter -= 256; }
-        Byte tac = io[0x07];
-        if (tac & 0x04) {
+        if (io[0x07] & 0x04) {
             tacCounter += cycles; int threshold = 1024;
-        switch (tac & 0x03) { case 0: threshold = 1024; break; case 1: threshold = 16; break; case 2: threshold = 64; break; case 3: threshold = 256; break; }
-                                    while (tacCounter >= threshold) { tacCounter -= threshold; Byte tima = io[0x05]; if (tima == 0xFF) { io[0x05] = io[0x06]; RequestInterrupt(2); } else { io[0x05]++; } }
+            switch (io[0x07] & 0x03) { case 0: threshold = 1024; break; case 1: threshold = 16; break; case 2: threshold = 64; break; case 3: threshold = 256; break; }
+            while (tacCounter >= threshold) { tacCounter -= threshold; if (io[0x05] == 0xFF) { io[0x05] = io[0x06]; RequestInterrupt(2); } else { io[0x05]++; } }
         }
     }
     void CheckJoypadInterrupt() {
-        Byte select = io[0x00];
-        bool req = false;
-        if (!(select & 0x10)) { // Directions selected
-            if ((joypadDir & 0x0F) != 0x0F) req = true;
-        }
-        if (!(select & 0x20)) { // Buttons selected
-            if ((joypadButtons & 0x0F) != 0x0F) req = true;
-        }
+        Byte select = io[0x00]; bool req = false;
+        if (!(select & 0x10) && (joypadDir & 0x0F) != 0x0F) req = true;
+        if (!(select & 0x20) && (joypadButtons & 0x0F) != 0x0F) req = true;
         if (req) RequestInterrupt(4);
     }
-    Byte GetJoypadState() {
-        Byte select = io[0x00]; Byte result = 0xCF | select;
-        if (!(select & 0x10)) result &= (0xF0 | joypadDir);
-        if (!(select & 0x20)) result &= (0xF0 | joypadButtons);
-        return result;
-    }
+    Byte GetJoypadState() { Byte select = io[0x00]; Byte result = 0xCF | select; if (!(select & 0x10)) result &= (0xF0 | joypadDir); if (!(select & 0x20)) result &= (0xF0 | joypadButtons); return result; }
     Byte Read(Word addr) {
         int maxBanks = (int)(rom.size() / 0x4000); if (maxBanks == 0) maxBanks = 1;
-        if (addr < 0x4000) {
-            if (mbcType == 1 && bankingMode == 1) {
-                int bank = (ramBank << 5);
-                bank %= maxBanks;
-                return rom[(bank * 0x4000) + addr];
-            }
-            return rom[addr];
-        }
-        if (addr < 0x8000) {
-            int bank = romBank;
-            if (mbcType == 1 && bankingMode == 0) bank |= (ramBank << 5);
-            if (mbcType == 4) bank |= (ramBank << 6); // HuC1
-            bank %= maxBanks;
-            return rom[(bank * 0x4000) + (addr - 0x4000)];
-        }
+        if (addr < 0x4000) { if (mbcType == 1 && bankingMode == 1) { int bank = (ramBank << 5); bank %= maxBanks; return rom[(bank * 0x4000) + addr]; } return rom[addr]; }
+        if (addr < 0x8000) { int bank = romBank; if (mbcType == 1 && bankingMode == 0) bank |= (ramBank << 5); if (mbcType == 4) bank |= (ramBank << 6); bank %= maxBanks; return rom[(bank * 0x4000) + (addr - 0x4000)]; }
         if (addr < 0xA000) return vram[addr - 0x8000];
         if (addr < 0xC000) {
             if (!ramEnable) return 0xFF;
-            if (mbcType == 3 && rtcMapped) {
-        switch (ramBank) { case 0x08: return rtcS; case 0x09: return rtcM; case 0x0A: return rtcH; case 0x0B: return rtcDL; case 0x0C: return rtcDH; default: return 0xFF; }
-            }
-            else if (mbcType == 2) {
-                return (sram[(addr - 0xA000) & ramSizeMask] & 0x0F) | 0xF0;
-            }
-            else {
-                if (ramSizeMask == 0) return 0xFF;
-                int bank = 0;
-                if (mbcType == 1) {
-                    bank = (bankingMode == 1) ? ramBank : 0;
-                }
-                else if (mbcType == 3 || mbcType == 5 || mbcType == 4) {
-                    bank = ramBank;
-                }
-                size_t idx = (bank * 0x2000) + (addr - 0xA000);
-                return sram[idx & ramSizeMask];
-            }
+            if (mbcType == 3 && rtcMapped) { switch (ramBank) { case 0x08: return rtcS; case 0x09: return rtcM; case 0x0A: return rtcH; case 0x0B: return rtcDL; case 0x0C: return rtcDH; default: return 0xFF; } }
+            else if (mbcType == 2) return (sram[(addr - 0xA000) & ramSizeMask] & 0x0F) | 0xF0;
+            else { if (ramSizeMask == 0) return 0xFF; int bank = 0; if (mbcType == 1) bank = (bankingMode == 1) ? ramBank : 0; else if (mbcType == 3 || mbcType == 5 || mbcType == 4) bank = ramBank; return sram[((bank * 0x2000) + (addr - 0xA000)) & ramSizeMask]; }
         }
-        if (addr < 0xE000) return wram[addr - 0xC000];
-        if (addr < 0xFE00) return wram[addr - 0xE000];
-        if (addr < 0xFEA0) return oam[addr - 0xFE00];
-        if (addr < 0xFF00) return 0xFF;
-        if (addr == 0xFF00) return GetJoypadState();
-        if (addr == 0xFF0F) return interruptFlag;
+        if (addr < 0xE000) return wram[addr - 0xC000]; if (addr < 0xFE00) return wram[addr - 0xE000];
+        if (addr < 0xFEA0) return oam[addr - 0xFE00]; if (addr < 0xFF00) return 0xFF;
+        if (addr == 0xFF00) return GetJoypadState(); if (addr == 0xFF0F) return interruptFlag;
         if (addr >= 0xFF10 && addr <= 0xFF3F) { if (apu) return apu->Read(addr); return 0xFF; }
-        if (addr < 0xFF80) return io[addr - 0xFF00];
-        if (addr < 0xFFFF) return hram[addr - 0xFF80];
-        if (addr == 0xFFFF) return interruptEnable;
-        return 0xFF;
+        if (addr < 0xFF80) return io[addr - 0xFF00]; if (addr < 0xFFFF) return hram[addr - 0xFF80];
+        if (addr == 0xFFFF) return interruptEnable; return 0xFF;
     }
     void Write(Word addr, Byte value) {
         if (addr < 0x8000) {
-            if (mbcType == 1) {
-                if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A);
-                else if (addr < 0x4000) { romBank = value & 0x1F; if (romBank == 0) romBank = 1; }
-                else if (addr < 0x6000) ramBank = value & 0x03;
-                else if (addr < 0x8000) bankingMode = value & 0x01;
-            }
-            else if (mbcType == 2) {
-                if (addr < 0x4000) { if (addr & 0x0100) { romBank = value & 0x0F; if (romBank == 0) romBank = 1; } else ramEnable = ((value & 0x0F) == 0x0A); }
-            }
-            else if (mbcType == 3) {
-                if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A); else if (addr < 0x4000) { romBank = value & 0x7F; if (romBank == 0) romBank = 1; }
-                else if (addr < 0x6000) { ramBank = value; rtcMapped = (value >= 0x08 && value <= 0x0C); }
-                else if (addr < 0x8000) rtcLatch = value;
-            }
-            else if (mbcType == 4) {
-                if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A);
-                else if (addr < 0x4000) { romBank = value & 0x3F; /* HuC1: 0->1変換なし */ }
-                else if (addr < 0x6000) ramBank = value & 0x03;
-                else if (addr < 0x8000) bankingMode = value & 0x01;
-            }
-            else if (mbcType == 5) {
-                if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A); else if (addr < 0x3000) romBank = (romBank & 0x100) | value; else if (addr < 0x4000) romBank = (romBank & 0x0FF) | ((value & 0x01) << 8); else if (addr < 0x6000) ramBank = value & 0x0F;
-            }
-            return;
+            if (mbcType == 1) { if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A); else if (addr < 0x4000) { romBank = value & 0x1F; if (romBank == 0) romBank = 1; } else if (addr < 0x6000) ramBank = value & 0x03; else if (addr < 0x8000) bankingMode = value & 0x01; }
+            else if (mbcType == 2) { if (addr < 0x4000) { if (addr & 0x0100) { romBank = value & 0x0F; if (romBank == 0) romBank = 1; } else ramEnable = ((value & 0x0F) == 0x0A); } }
+            else if (mbcType == 3) { if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A); else if (addr < 0x4000) { romBank = value & 0x7F; if (romBank == 0) romBank = 1; } else if (addr < 0x6000) { ramBank = value; rtcMapped = (value >= 0x08 && value <= 0x0C); } else if (addr < 0x8000) rtcLatch = value; }
+            else if (mbcType == 4) { if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A); else if (addr < 0x4000) romBank = value & 0x3F; else if (addr < 0x6000) ramBank = value & 0x03; else if (addr < 0x8000) bankingMode = value & 0x01; }
+            else if (mbcType == 5) { if (addr < 0x2000) ramEnable = ((value & 0x0F) == 0x0A); else if (addr < 0x3000) romBank = (romBank & 0x100) | value; else if (addr < 0x4000) romBank = (romBank & 0x0FF) | ((value & 0x01) << 8); else if (addr < 0x6000) ramBank = value & 0x0F; } return;
         }
         if (addr < 0xA000) { vram[addr - 0x8000] = value; return; }
         if (addr < 0xC000) {
             if (ramEnable) {
-                if (mbcType == 3 && rtcMapped) { /* RTC Write */ }
-                else if (mbcType == 2) {
-                    sram[(addr - 0xA000) & ramSizeMask] = value & 0x0F;
-                }
-                else {
-                    if (ramSizeMask == 0) return;
-                    int bank = 0;
-                    if (mbcType == 1) bank = (bankingMode == 1) ? ramBank : 0;
-                    else if (mbcType == 3 || mbcType == 5 || mbcType == 4) bank = ramBank;
-                    size_t idx = (bank * 0x2000) + (addr - 0xA000);
-                    sram[idx & ramSizeMask] = value;
-                }
-            }
-            return;
+                if (mbcType == 3 && rtcMapped) {} else if (mbcType == 2) sram[(addr - 0xA000) & ramSizeMask] = value & 0x0F;
+                else { if (ramSizeMask == 0) return; int bank = 0; if (mbcType == 1) bank = (bankingMode == 1) ? ramBank : 0; else if (mbcType == 3 || mbcType == 5 || mbcType == 4) bank = ramBank; sram[((bank * 0x2000) + (addr - 0xA000)) & ramSizeMask] = value; }
+            } return;
         }
-        if (addr < 0xE000) { wram[addr - 0xC000] = value; return; }
-        if (addr < 0xFE00) { wram[addr - 0xE000] = value; return; }
-        if (addr < 0xFEA0) { oam[addr - 0xFE00] = value; return; }
-        if (addr < 0xFF00) return;
-        if (addr == 0xFF00) { io[0x00] = value; CheckJoypadInterrupt(); return; }
-        if (addr == 0xFF04) { io[0x04] = 0; divCounter = 0; return; }
-        if (addr == 0xFF0F) { interruptFlag = value; return; }
-        if (addr == 0xFF46) { DoDMA(value); return; }
-        if (addr == 0xFF41) { io[0x41] = (value & 0xF8) | (io[0x41] & 0x07); return; }
-        if (addr == 0xFF44) { io[0x44] = 0; return; }
+        if (addr < 0xE000) { wram[addr - 0xC000] = value; return; } if (addr < 0xFE00) { wram[addr - 0xE000] = value; return; }
+        if (addr < 0xFEA0) { oam[addr - 0xFE00] = value; return; } if (addr < 0xFF00) return;
+        if (addr == 0xFF00) { io[0x00] = value; CheckJoypadInterrupt(); return; } if (addr == 0xFF04) { io[0x04] = 0; divCounter = 0; return; }
+        if (addr == 0xFF0F) { interruptFlag = value; return; } if (addr == 0xFF46) { DoDMA(value); return; }
+        if (addr == 0xFF41) { io[0x41] = (value & 0xF8) | (io[0x41] & 0x07); return; } if (addr == 0xFF44) { io[0x44] = 0; return; }
         if (addr >= 0xFF10 && addr <= 0xFF3F) { if (apu) apu->Write(addr, value); return; }
-        if (addr < 0xFF80) { io[addr - 0xFF00] = value; return; }
-        if (addr < 0xFFFF) { hram[addr - 0xFF80] = value; return; }
+        if (addr < 0xFF80) { io[addr - 0xFF00] = value; return; } if (addr < 0xFFFF) { hram[addr - 0xFF80] = value; return; }
         if (addr == 0xFFFF) { interruptEnable = value; return; }
     }
-    void SetKey(int keyId, bool pressed) {
-        Byte* target = (keyId < 4) ? &joypadDir : &joypadButtons;
-        int bit = keyId % 4;
-        Byte oldVal = *target;
-        if (pressed) *target &= ~(1 << bit); else *target |= (1 << bit);
-        if (pressed && (oldVal & (1 << bit))) {
-            CheckJoypadInterrupt();
-        }
-    }
-    std::string GetTitle() {
-        if (rom.size() < 0x143) return "";
-        char buf[17] = { 0 }; for (int i = 0; i < 16; i++) { char c = rom[0x0134 + i]; if (c == 0) break; buf[i] = c; }
-        return std::string(buf);
-    }
-    std::string GetMBCName() {
-        if (mbcType == 1) return "MBC1"; if (mbcType == 2) return "MBC2"; if (mbcType == 3) return "MBC3"; if (mbcType == 5) return "MBC5"; if (mbcType == 4) return "HuC1"; return "ROM ONLY";
-    }
+    void SetKey(int keyId, bool pressed) { Byte* target = (keyId < 4) ? &joypadDir : &joypadButtons; int bit = keyId % 4; Byte oldVal = *target; if (pressed) *target &= ~(1 << bit); else *target |= (1 << bit); if (pressed && (oldVal & (1 << bit))) CheckJoypadInterrupt(); }
+    std::string GetTitle() { if (rom.size() < 0x143) return ""; char buf[17] = { 0 }; for (int i = 0; i < 16; i++) { char c = rom[0x0134 + i]; if (c == 0) break; buf[i] = c; } return std::string(buf); }
+    std::string GetMBCName() { if (mbcType == 1) return "MBC1"; if (mbcType == 2) return "MBC2"; if (mbcType == 3) return "MBC3"; if (mbcType == 5) return "MBC5"; if (mbcType == 4) return "HuC1"; return "ROM ONLY"; }
 };
-// -----------------------------------------------------------------------------
-// PPU
-// -----------------------------------------------------------------------------
 class PPU {
-private:
-    MMU* mmu; uint32_t* screenBuffer; int cycleCounter; int mode; int windowLine; bool statIntSignal;
+    MMU* mmu; uint32_t* screenBuffer; int cycleCounter, mode, windowLine; bool statIntSignal;
     Byte latchSCX, latchSCY, latchBGP, latchOBP0, latchOBP1, latchLCDC, latchWY; int latchWX;
     const uint32_t PALETTE[4] = { 0xFFE0F8D0, 0xFF88C070, 0xFF346856, 0xFF081820 };
 public:
     PPU(MMU* m) : mmu(m), screenBuffer(nullptr), cycleCounter(0), mode(2), windowLine(0), statIntSignal(false) {}
-    void Reset() {
-        cycleCounter = 0; mode = 2; windowLine = 0; statIntSignal = false;
-        if (mmu) mmu->io[0x41] = (mmu->io[0x41] & 0xFC) | 2;
-    }
+    void Reset() { cycleCounter = 0; mode = 2; windowLine = 0; statIntSignal = false; if (mmu) mmu->io[0x41] = (mmu->io[0x41] & 0xFC) | 2; }
     void SetScreenBuffer(uint32_t* buffer) { screenBuffer = buffer; }
-    Byte GetLY() { return mmu->io[0x44]; }
-    void SetLY(Byte v) { mmu->io[0x44] = v; }
-    Byte GetLCDC() { return mmu->io[0x40]; }
-    Byte GetSTAT() { return mmu->io[0x41]; }
-    void SetSTAT(Byte v) { mmu->io[0x41] = v; }
+    Byte GetLY() { return mmu->io[0x44]; } void SetLY(Byte v) { mmu->io[0x44] = v; }
+    Byte GetLCDC() { return mmu->io[0x40]; } Byte GetSTAT() { return mmu->io[0x41]; } void SetSTAT(Byte v) { mmu->io[0x41] = v; }
     Byte GetLYC() { return mmu->io[0x45]; }
     void Step(int cycles) {
-        Byte lcdc = GetLCDC();
-        if (!(lcdc & 0x80)) {
-            SetLY(0); cycleCounter = 0; mode = 2; windowLine = 0; statIntSignal = false;
-            SetSTAT(GetSTAT() & 0xFC); return;
-        }
-        cycleCounter += cycles; Byte ly = GetLY(); Byte stat = GetSTAT();
-        bool lycMatch = (ly == GetLYC());
+        if (!(GetLCDC() & 0x80)) { SetLY(0); cycleCounter = 0; mode = 2; windowLine = 0; statIntSignal = false; SetSTAT(GetSTAT() & 0xFC); return; }
+        cycleCounter += cycles; Byte ly = GetLY(); Byte stat = GetSTAT(); bool lycMatch = (ly == GetLYC());
         if (lycMatch) stat |= 0x04; else stat &= ~0x04;
         if (mode == 2) {
             if (cycleCounter >= 80) {
@@ -545,37 +298,25 @@ public:
                 latchOBP0 = mmu->io[0x48]; latchOBP1 = mmu->io[0x49]; latchLCDC = mmu->io[0x40];
                 latchWY = mmu->io[0x4A]; latchWX = (int)mmu->io[0x4B] - 7;
             }
-        }
-        else if (mode == 3) {
+        } else if (mode == 3) {
             if (cycleCounter >= 172) { cycleCounter -= 172; mode = 0; RenderScanline(ly); }
-        }
-        else if (mode == 0) {
+        } else if (mode == 0) {
             if (cycleCounter >= 204) {
                 cycleCounter -= 204; ly++; SetLY(ly);
-                if (ly == 144) { mode = 1; mmu->RequestInterrupt(0); windowLine = 0; }
-                else { mode = 2; }
+                if (ly == 144) { mode = 1; mmu->RequestInterrupt(0); windowLine = 0; } else { mode = 2; }
             }
-        }
-        else if (mode == 1) {
-            if (cycleCounter >= 456) {
-                cycleCounter -= 456; ly++;
-                if (ly > 153) { mode = 2; ly = 0; windowLine = 0; }
-                SetLY(ly);
-            }
+        } else if (mode == 1) {
+            if (cycleCounter >= 456) { cycleCounter -= 456; ly++; if (ly > 153) { mode = 2; ly = 0; windowLine = 0; } SetLY(ly); }
         }
         stat = (stat & 0xFC) | (mode & 0x03); SetSTAT(stat);
         bool currentSignal = false;
-        if ((stat & 0x40) && lycMatch) currentSignal = true;
-        if ((stat & 0x20) && (mode == 2)) currentSignal = true;
-        if ((stat & 0x10) && (mode == 1)) currentSignal = true;
-        if ((stat & 0x08) && (mode == 0)) currentSignal = true;
-        if (currentSignal && !statIntSignal) mmu->RequestInterrupt(1);
-        statIntSignal = currentSignal;
+        if ((stat & 0x40) && lycMatch) currentSignal = true; if ((stat & 0x20) && (mode == 2)) currentSignal = true;
+        if ((stat & 0x10) && (mode == 1)) currentSignal = true; if ((stat & 0x08) && (mode == 0)) currentSignal = true;
+        if (currentSignal && !statIntSignal) mmu->RequestInterrupt(1); statIntSignal = currentSignal;
     }
     void RenderScanline(int line) {
-        if (!screenBuffer) return;
-        Byte lcdc = latchLCDC; if (!(lcdc & 0x01)) return;
-        Byte scy = latchSCY; Byte scx = latchSCX; Byte bgp = latchBGP; Byte wy = latchWY; int wx = latchWX;
+        if (!screenBuffer) return; Byte lcdc = latchLCDC; if (!(lcdc & 0x01)) return;
+        Byte scy = latchSCY, scx = latchSCX, bgp = latchBGP, wy = latchWY; int wx = latchWX;
         uint32_t palette[4]; for (int i = 0; i < 4; i++) palette[i] = PALETTE[(bgp >> (i * 2)) & 3];
         Word mapBase = (lcdc & 0x08) ? 0x9C00 : 0x9800; Word tileBase = (lcdc & 0x10) ? 0x8000 : 0x9000; bool unsignedTile = (lcdc & 0x10);
         Byte mapY = line + scy;
@@ -600,14 +341,14 @@ public:
             windowLine++;
         }
         if (!(lcdc & 0x02)) return;
-        Byte obp0 = latchOBP0; Byte obp1 = latchOBP1; uint32_t palObj0[4], palObj1[4];
+        Byte obp0 = latchOBP0, obp1 = latchOBP1; uint32_t palObj0[4], palObj1[4];
         for (int i = 0; i < 4; i++) { palObj0[i] = PALETTE[(obp0 >> (i * 2)) & 3]; palObj1[i] = PALETTE[(obp1 >> (i * 2)) & 3]; }
         int height = (lcdc & 0x04) ? 16 : 8;
         for (int i = 0; i < 40; i++) {
-            Byte y = mmu->oam[i * 4]; Byte x = mmu->oam[i * 4 + 1]; Byte tile = mmu->oam[i * 4 + 2]; Byte attr = mmu->oam[i * 4 + 3];
+            Byte y = mmu->oam[i * 4], x = mmu->oam[i * 4 + 1], tile = mmu->oam[i * 4 + 2], attr = mmu->oam[i * 4 + 3];
             int spriteY = line - (y - 16); if (spriteY < 0 || spriteY >= height) continue;
             if (attr & 0x40) spriteY = height - 1 - spriteY; if (height == 16) tile &= 0xFE;
-            Word tileAddr = 0x8000 + (tile * 16) + (spriteY * 2); Byte b1 = mmu->Read(tileAddr); Byte b2 = mmu->Read(tileAddr + 1);
+            Word tileAddr = 0x8000 + (tile * 16) + (spriteY * 2); Byte b1 = mmu->Read(tileAddr), b2 = mmu->Read(tileAddr + 1);
             uint32_t* pal = (attr & 0x10) ? palObj1 : palObj0;
             for (int px = 0; px < 8; px++) {
                 int screenX = (x - 8) + px; if (screenX < 0 || screenX >= 160) continue;
@@ -618,16 +359,11 @@ public:
         }
     }
 };
-// -----------------------------------------------------------------------------
-// CPU
-// -----------------------------------------------------------------------------
 class CPU {
 public:
     struct Registers {
-        struct { union { struct { Byte f; Byte a; }; Word af; }; } af;
-        struct { union { struct { Byte c; Byte b; }; Word bc; }; } bc;
-        struct { union { struct { Byte e; Byte d; }; Word de; }; } de;
-        struct { union { struct { Byte l; Byte h; }; Word hl; }; } hl;
+        struct { union { struct { Byte f; Byte a; }; Word af; }; } af; struct { union { struct { Byte c; Byte b; }; Word bc; }; } bc;
+        struct { union { struct { Byte e; Byte d; }; Word de; }; } de; struct { union { struct { Byte l; Byte h; }; Word hl; }; } hl;
         Word sp, pc; bool ime; int imeDelay;
     } reg;
     MMU* mmu; bool halted, haltBugTriggered; int currentCycles;
@@ -639,17 +375,13 @@ public:
     Word Fetch16() { Byte l = Fetch(); Byte h = Fetch(); return (h << 8) | l; }
     void Push(Word val) { reg.sp--; Write(reg.sp, val >> 8); reg.sp--; Write(reg.sp, val & 0xFF); }
     Word Pop() { Byte l = Read(reg.sp++); Byte h = Read(reg.sp++); return (h << 8) | l; }
-    void F_Z(bool z) { if (z) reg.af.f |= 0x80; else reg.af.f &= ~0x80; }
-    void F_N(bool n) { if (n) reg.af.f |= 0x40; else reg.af.f &= ~0x40; }
-    void F_H(bool h) { if (h) reg.af.f |= 0x20; else reg.af.f &= ~0x20; }
-    void F_C(bool c) { if (c) reg.af.f |= 0x10; else reg.af.f &= ~0x10; }
+    void F_Z(bool z) { if (z) reg.af.f |= 0x80; else reg.af.f &= ~0x80; } void F_N(bool n) { if (n) reg.af.f |= 0x40; else reg.af.f &= ~0x40; }
+    void F_H(bool h) { if (h) reg.af.f |= 0x20; else reg.af.f &= ~0x20; } void F_C(bool c) { if (c) reg.af.f |= 0x10; else reg.af.f &= ~0x10; }
     bool IsZ() const { return reg.af.f & 0x80; } bool IsC() const { return reg.af.f & 0x10; }
     Byte GetR8(int idx) { switch (idx) { case 0: return reg.bc.b; case 1: return reg.bc.c; case 2: return reg.de.d; case 3: return reg.de.e; case 4: return reg.hl.h; case 5: return reg.hl.l; case 6: return Read(reg.hl.hl); case 7: return reg.af.a; } return 0; }
     void SetR8(int idx, Byte val) { switch (idx) { case 0: reg.bc.b = val; break; case 1: reg.bc.c = val; break; case 2: reg.de.d = val; break; case 3: reg.de.e = val; break; case 4: reg.hl.h = val; break; case 5: reg.hl.l = val; break; case 6: Write(reg.hl.hl, val); break; case 7: reg.af.a = val; break; } }
     Word GetR16(int idx, bool af = false) { switch (idx) { case 0: return reg.bc.bc; case 1: return reg.de.de; case 2: return reg.hl.hl; case 3: return af ? reg.af.af : reg.sp; } return 0; }
-    void SetR16(int idx, Word val, bool af = false) {
-        switch (idx) { case 0: reg.bc.bc = val; break; case 1: reg.de.de = val; break; case 2: reg.hl.hl = val; break; case 3: if (af) { reg.af.af = val; reg.af.f &= 0xF0; } else { reg.sp = val; } break; }
-    }
+    void SetR16(int idx, Word val, bool af = false) { switch (idx) { case 0: reg.bc.bc = val; break; case 1: reg.de.de = val; break; case 2: reg.hl.hl = val; break; case 3: if (af) { reg.af.af = val; reg.af.f &= 0xF0; } else { reg.sp = val; } break; } }
     void ALU_ADD(Byte v) { int r = reg.af.a + v; F_Z((r & 0xFF) == 0); F_N(0); F_H((reg.af.a & 0xF) + (v & 0xF) > 0xF); F_C(r > 0xFF); reg.af.a = (Byte)r; }
     void ALU_ADC(Byte v) { int c = IsC() ? 1 : 0; int r = reg.af.a + v + c; F_Z((r & 0xFF) == 0); F_N(0); F_H((reg.af.a & 0xF) + (v & 0xF) + c > 0xF); F_C(r > 0xFF); reg.af.a = (Byte)r; }
     void ALU_SUB(Byte v) { int r = reg.af.a - v; F_Z((r & 0xFF) == 0); F_N(1); F_H((reg.af.a & 0xF) < (v & 0xF)); F_C(reg.af.a < v); reg.af.a = (Byte)r; }
@@ -671,42 +403,20 @@ public:
     void BIT(int b, Byte v) { F_Z(!(v & (1 << b))); F_N(0); F_H(1); }
     void ExecCB() {
         Byte op = Fetch(); Byte r = op & 0x07; Byte val = GetR8(r);
-        if (op < 0x40) {
-            switch ((op >> 3) & 7) { case 0: RLC(val); break; case 1: RRC(val); break; case 2: RL(val); break; case 3: RR(val); break; case 4: SLA(val); break; case 5: SRA(val); break; case 6: SWAP(val); break; case 7: SRL(val); break; } SetR8(r, val);
-        }
-        else {
-            int bit = (op >> 3) & 7; if (op < 0x80) BIT(bit, val); else if (op < 0xC0) { val &= ~(1 << bit); SetR8(r, val); }
-            else { val |= (1 << bit); SetR8(r, val); }
-        }
+        if (op < 0x40) { switch ((op >> 3) & 7) { case 0: RLC(val); break; case 1: RRC(val); break; case 2: RL(val); break; case 3: RR(val); break; case 4: SLA(val); break; case 5: SRA(val); break; case 6: SWAP(val); break; case 7: SRL(val); break; } SetR8(r, val); }
+        else { int bit = (op >> 3) & 7; if (op < 0x80) BIT(bit, val); else if (op < 0xC0) { val &= ~(1 << bit); SetR8(r, val); } else { val |= (1 << bit); SetR8(r, val); } }
     }
     bool HandleInterrupts() {
         if (reg.ime && (mmu->interruptFlag & mmu->interruptEnable)) {
-            Byte fired = mmu->interruptFlag & mmu->interruptEnable;
-            int bit = 0;
-            if (fired & 0x01) bit = 0;
-            else if (fired & 0x02) bit = 1;
-            else if (fired & 0x04) bit = 2;
-            else if (fired & 0x08) bit = 3;
-            else if (fired & 0x10) bit = 4;
-            else return false;
-            reg.ime = false;
-            mmu->interruptFlag &= ~(1 << bit);
-            Push(reg.pc);
-            reg.pc = 0x0040 + (bit * 8);
-            currentCycles += 20;
-            halted = false;
-            return true;
-        }
-        return false;
+            Byte fired = mmu->interruptFlag & mmu->interruptEnable; int bit = 0;
+            if (fired & 0x01) bit = 0; else if (fired & 0x02) bit = 1; else if (fired & 0x04) bit = 2; else if (fired & 0x08) bit = 3; else if (fired & 0x10) bit = 4; else return false;
+            reg.ime = false; mmu->interruptFlag &= ~(1 << bit); Push(reg.pc); reg.pc = 0x0040 + (bit * 8); currentCycles += 20; halted = false; return true;
+        } return false;
     }
     int Step() {
         if (reg.imeDelay > 0) { reg.imeDelay--; if (reg.imeDelay == 0) reg.ime = true; }
         if (HandleInterrupts()) return currentCycles;
-        if (halted) {
-            currentCycles = 4;
-            if (mmu->interruptFlag & mmu->interruptEnable) { halted = false; if (!reg.ime) haltBugTriggered = true; }
-            return currentCycles;
-        }
+        if (halted) { currentCycles = 4; if (mmu->interruptFlag & mmu->interruptEnable) { halted = false; if (!reg.ime) haltBugTriggered = true; } return currentCycles; }
         currentCycles = 0; Byte op = Fetch();
         if ((op & 0xC0) == 0x40) { if (op == 0x76) halted = true; else SetR8((op >> 3) & 7, GetR8(op & 7)); }
         else if ((op & 0xC0) == 0x80) { Byte v = GetR8(op & 7); switch ((op >> 3) & 7) { case 0: ALU_ADD(v); break; case 1: ALU_ADC(v); break; case 2: ALU_SUB(v); break; case 3: ALU_SBC(v); break; case 4: ALU_AND(v); break; case 5: ALU_XOR(v); break; case 6: ALU_OR(v); break; case 7: ALU_CP(v); break; } }
@@ -746,312 +456,112 @@ public:
         return currentCycles;
     }
 };
-// -----------------------------------------------------------------------------
-// GameBoyCore
-// -----------------------------------------------------------------------------
-class GameBoyCore
-{
+class GameBoyCore {
 public:
-    MMU mmu;
-    CPU cpu;
-    PPU ppu;
-    APU apu;
-    std::vector<uint32_t> displayBuffer;
-    bool isRomLoaded;
-    std::wstring m_savePath;
-    GameBoyCore() : cpu(&mmu), ppu(&mmu), isRomLoaded(false) {
-        displayBuffer.resize(GB_WIDTH * GB_HEIGHT);
-        ppu.SetScreenBuffer(displayBuffer.data());
-        mmu.SetAPU(&apu);
-        Reset(false);
-    }
-    void Reset(bool loaded) {
-        mmu.Reset();
-        cpu.Reset();
-        ppu.Reset();
-        apu.Reset();
-        isRomLoaded = loaded;
-        if (!isRomLoaded) {
-            SetupTestRender();
-        }
-        else {
-            mmu.io[0x40] = 0x91;
-            mmu.io[0x47] = 0xE4;
-        }
-    }
+    MMU mmu; CPU cpu; PPU ppu; APU apu; std::vector<uint32_t> displayBuffer; bool isRomLoaded; std::wstring m_savePath;
+    GameBoyCore() : cpu(&mmu), ppu(&mmu), isRomLoaded(false) { displayBuffer.resize(GB_WIDTH * GB_HEIGHT); ppu.SetScreenBuffer(displayBuffer.data()); mmu.SetAPU(&apu); Reset(false); }
+    void Reset(bool loaded) { mmu.Reset(); cpu.Reset(); ppu.Reset(); apu.Reset(); isRomLoaded = loaded; if (!isRomLoaded) SetupTestRender(); else { mmu.io[0x40] = 0x91; mmu.io[0x47] = 0xE4; } }
     void SetupTestRender() {
-        if (mmu.rom.size() < 0x200) mmu.rom.resize(0x200, 0);
-        mmu.io[0x40] = 0x91;
-        mmu.io[0x47] = 0xE4;
-        for (int i = 0; i < 0x1800; i++) mmu.vram[i] = (i % 2 == 0) ? 0xFF : 0x00;
-        mmu.rom[0x0100] = 0x00; mmu.rom[0x0101] = 0xC3; mmu.rom[0x0102] = 0x00; mmu.rom[0x0103] = 0x01;
+        if (mmu.rom.size() < 0x200) mmu.rom.resize(0x200, 0); mmu.io[0x40] = 0x91; mmu.io[0x47] = 0xE4;
+        for (int i = 0; i < 0x1800; i++) mmu.vram[i] = (i % 2 == 0) ? 0xFF : 0x00; mmu.rom[0x0100] = 0x00; mmu.rom[0x0101] = 0xC3; mmu.rom[0x0102] = 0x00; mmu.rom[0x0103] = 0x01;
     }
     bool LoadRom(const std::wstring& path) {
-        FILE* fp = NULL;
-        _wfopen_s(&fp, path.c_str(), L"rb");
-        if (!fp) return false;
-        fseek(fp, 0, SEEK_END);
-        long size = ftell(fp);
-        fseek(fp, 0, SEEK_SET);
-        std::vector<Byte> buffer(size);
+        FILE* fp = NULL; _wfopen_s(&fp, path.c_str(), L"rb"); if (!fp) return false;
+        fseek(fp, 0, SEEK_END); long size = ftell(fp); fseek(fp, 0, SEEK_SET); std::vector<Byte> buffer(size);
         if (fread(buffer.data(), 1, size, fp) == size) {
-            fclose(fp);
-            Reset(true);
-            mmu.LoadRomData(buffer);
-            m_savePath = path;
-            size_t dotPos = m_savePath.find_last_of(L'.');
-            if (dotPos != std::string::npos) {
-                m_savePath = m_savePath.substr(0, dotPos);
-            }
-            m_savePath += L".sav";
-            mmu.LoadRAM(m_savePath);
-            return true;
-        }
-        fclose(fp);
-        return false;
+            fclose(fp); Reset(true); mmu.LoadRomData(buffer); m_savePath = path;
+            size_t dotPos = m_savePath.find_last_of(L'.'); if (dotPos != std::string::npos) m_savePath = m_savePath.substr(0, dotPos); m_savePath += L".sav"; mmu.LoadRAM(m_savePath); return true;
+        } fclose(fp); return false;
     }
-    void SaveRAM() {
-        if (isRomLoaded && !m_savePath.empty()) {
-            mmu.SaveRAM(m_savePath);
-        }
-    }
-    std::string GetTitle() {
-        return mmu.GetTitle() + " (" + mmu.GetMBCName() + ")";
-    }
+    void SaveRAM() { if (isRomLoaded && !m_savePath.empty()) mmu.SaveRAM(m_savePath); }
+    std::string GetTitle() { return mmu.GetTitle() + " (" + mmu.GetMBCName() + ")"; }
     void StepFrame() {
-        const int CYCLES_PER_FRAME = 70224;
-        int cyclesThisFrame = 0;
-        apu.buffer.clear();
-        while (cyclesThisFrame < CYCLES_PER_FRAME) {
-            int cycles = cpu.Step();
-            ppu.Step(cycles);
-            mmu.UpdateRTC();
-            mmu.UpdateTimers(cycles);
-            apu.Step(cycles);
-            cyclesThisFrame += cycles;
-        }
+        const int CYCLES_PER_FRAME = 70224; int cyclesThisFrame = 0; apu.buffer.clear();
+        while (cyclesThisFrame < CYCLES_PER_FRAME) { int cycles = cpu.Step(); ppu.Step(cycles); mmu.UpdateRTC(); mmu.UpdateTimers(cycles); apu.Step(cycles); cyclesThisFrame += cycles; }
     }
     const void* GetPixelData() const { return displayBuffer.data(); }
     void InputKey(int key, bool pressed) { mmu.SetKey(key, pressed); }
     const std::vector<int16_t>& GetAudioSamples() { return apu.buffer; }
 };
-// -----------------------------------------------------------------------------
-// App Class
-// -----------------------------------------------------------------------------
-class App
-{
-private:
-    HWND m_hwnd;
-    ID2D1Factory* m_pDirect2dFactory;
-    ID2D1HwndRenderTarget* m_pRenderTarget;
-    ID2D1Bitmap* m_pBitmap;
-    GameBoyCore m_gbCore;
-    AudioDriver m_audio;
-    BOOL m_isFullscreen;
-    WINDOWPLACEMENT m_wpPrev;
-    HMENU m_hMenu;
+class App {
+    HWND m_hwnd; ID2D1Factory* m_pDirect2dFactory; ID2D1HwndRenderTarget* m_pRenderTarget; ID2D1Bitmap* m_pBitmap;
+    GameBoyCore m_gbCore; AudioDriver m_audio; BOOL m_isFullscreen; WINDOWPLACEMENT m_wpPrev; HMENU m_hMenu;
 public:
-    App() : m_hwnd(NULL), m_pDirect2dFactory(NULL), m_pRenderTarget(NULL), m_pBitmap(NULL),
-        m_isFullscreen(FALSE), m_hMenu(NULL) {
-        ZeroMemory(&m_wpPrev, sizeof(m_wpPrev));
-    }
-    ~App() {
-        m_gbCore.SaveRAM();
-        SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); SafeRelease(&m_pDirect2dFactory);
-    }
+    App() : m_hwnd(NULL), m_pDirect2dFactory(NULL), m_pRenderTarget(NULL), m_pBitmap(NULL), m_isFullscreen(FALSE), m_hMenu(NULL) { ZeroMemory(&m_wpPrev, sizeof(m_wpPrev)); }
+    ~App() { m_gbCore.SaveRAM(); SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); SafeRelease(&m_pDirect2dFactory); }
     HRESULT Initialize(HINSTANCE hInstance, int nCmdShow) {
         D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &m_pDirect2dFactory);
-        WNDCLASSEX wcex = { sizeof(WNDCLASSEX) };
-        wcex.style = CS_HREDRAW | CS_VREDRAW;
-        wcex.lpfnWndProc = App::WndProc;
-        wcex.cbWndExtra = sizeof(LONG_PTR);
-        wcex.hInstance = hInstance;
-        wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wcex.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-        wcex.lpszClassName = L"D2DGameBoyWnd";
-        RegisterClassEx(&wcex);
-        HMENU hMenu = CreateMenu();
-        HMENU hSubMenu = CreatePopupMenu();
-        AppendMenu(hSubMenu, MF_STRING, IDM_FILE_OPEN, L"Open ROM...");
-        AppendMenu(hSubMenu, MF_STRING, IDM_FILE_FULLSCREEN, L"Fullscreen\tF11");
-        AppendMenu(hSubMenu, MF_SEPARATOR, 0, NULL);
-        AppendMenu(hSubMenu, MF_STRING, IDM_FILE_EXIT, L"Exit");
-        AppendMenu(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSubMenu, L"File");
-        int screenW = GetSystemMetrics(SM_CXSCREEN);
-        int screenH = GetSystemMetrics(SM_CYSCREEN);
-        int winW = GB_WIDTH * 4;
-        int winH = GB_HEIGHT * 4;
-        RECT rc = { 0, 0, winW, winH };
-        AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, TRUE);
-        int finalW = rc.right - rc.left;
-        int finalH = rc.bottom - rc.top;
-        int posX = (screenW - finalW) / 2;
-        int posY = (screenH - finalH) / 2;
-        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator", WS_OVERLAPPEDWINDOW,
-            posX, posY, finalW, finalH, NULL, hMenu, hInstance, this);
-        if (m_hwnd) {
-            DragAcceptFiles(m_hwnd, TRUE);
-            m_hMenu = GetMenu(m_hwnd);
-            ShowWindow(m_hwnd, nCmdShow);
-            UpdateWindow(m_hwnd);
-            if (!m_audio.Initialize(m_hwnd)) {
-                MessageBox(m_hwnd, L"DirectSound Init Failed", L"Error", MB_OK);
-            }
-            return S_OK;
-        }
-        return E_FAIL;
+        WNDCLASSEX wcex = { sizeof(WNDCLASSEX) }; wcex.style = CS_HREDRAW | CS_VREDRAW; wcex.lpfnWndProc = App::WndProc; wcex.cbWndExtra = sizeof(LONG_PTR);
+        wcex.hInstance = hInstance; wcex.hCursor = LoadCursor(NULL, IDC_ARROW); wcex.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH); wcex.lpszClassName = L"D2DGameBoyWnd";
+        RegisterClassEx(&wcex); HMENU hMenu = CreateMenu(); HMENU hSubMenu = CreatePopupMenu();
+        AppendMenu(hSubMenu, MF_STRING, IDM_FILE_OPEN, L"Open ROM..."); AppendMenu(hSubMenu, MF_STRING, IDM_FILE_FULLSCREEN, L"Fullscreen\tF11");
+        AppendMenu(hSubMenu, MF_SEPARATOR, 0, NULL); AppendMenu(hSubMenu, MF_STRING, IDM_FILE_EXIT, L"Exit"); AppendMenu(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hSubMenu, L"File");
+        int screenW = GetSystemMetrics(SM_CXSCREEN), screenH = GetSystemMetrics(SM_CYSCREEN), winW = GB_WIDTH * 4, winH = GB_HEIGHT * 4;
+        RECT rc = { 0, 0, winW, winH }; AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, TRUE);
+        m_hwnd = CreateWindow(L"D2DGameBoyWnd", L"GameBoy Emulator", WS_OVERLAPPEDWINDOW, (screenW - (rc.right - rc.left)) / 2, (screenH - (rc.bottom - rc.top)) / 2, rc.right - rc.left, rc.bottom - rc.top, NULL, hMenu, hInstance, this);
+        if (m_hwnd) { DragAcceptFiles(m_hwnd, TRUE); m_hMenu = GetMenu(m_hwnd); ShowWindow(m_hwnd, nCmdShow); UpdateWindow(m_hwnd); if (!m_audio.Initialize(m_hwnd)) MessageBox(m_hwnd, L"DirectSound Init Failed", L"Error", MB_OK); return S_OK; } return E_FAIL;
     }
     void OpenRomFile(const std::wstring& path) {
-        PauseAudio();
-        std::wstring cleanPath = path;
-        if (!cleanPath.empty() && cleanPath.front() == L'\"') cleanPath.erase(0, 1);
-        if (!cleanPath.empty() && cleanPath.back() == L'\"') cleanPath.pop_back();
-        if (m_gbCore.LoadRom(cleanPath)) {
-            std::string titleStr = m_gbCore.GetTitle();
-            std::wstring wTitle(titleStr.begin(), titleStr.end());
-            std::wstring winTitle = L"GameBoy Emulator - " + wTitle;
-            SetWindowText(m_hwnd, winTitle.c_str());
-        }
+        PauseAudio(); std::wstring cleanPath = path;
+        if (!cleanPath.empty() && cleanPath.front() == L'\"') cleanPath.erase(0, 1); if (!cleanPath.empty() && cleanPath.back() == L'\"') cleanPath.pop_back();
+        if (m_gbCore.LoadRom(cleanPath)) { std::string titleStr = m_gbCore.GetTitle(); std::wstring wTitle(titleStr.begin(), titleStr.end()); SetWindowText(m_hwnd, (L"GameBoy Emulator - " + wTitle).c_str()); }
         ResumeAudio();
     }
-    void OnDropFiles(HDROP hDrop) {
-        wchar_t szFile[MAX_PATH];
-        if (DragQueryFile(hDrop, 0, szFile, MAX_PATH) > 0) {
-            OpenRomFile(szFile);
-            SetForegroundWindow(m_hwnd);
-            SetFocus(m_hwnd);
-        }
-        DragFinish(hDrop);
-    }
+    void OnDropFiles(HDROP hDrop) { wchar_t szFile[MAX_PATH]; if (DragQueryFile(hDrop, 0, szFile, MAX_PATH) > 0) { OpenRomFile(szFile); SetForegroundWindow(m_hwnd); SetFocus(m_hwnd); } DragFinish(hDrop); }
     void ToggleFullscreen() {
         DWORD dwStyle = GetWindowLong(m_hwnd, GWL_STYLE);
         if (m_isFullscreen) {
-            SetWindowLong(m_hwnd, GWL_STYLE, dwStyle | WS_OVERLAPPEDWINDOW);
-            SetWindowPlacement(m_hwnd, &m_wpPrev);
+            SetWindowLong(m_hwnd, GWL_STYLE, dwStyle | WS_OVERLAPPEDWINDOW); SetWindowPlacement(m_hwnd, &m_wpPrev);
             SetWindowPos(m_hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-            SetMenu(m_hwnd, m_hMenu);
-            CheckMenuItem(m_hMenu, IDM_FILE_FULLSCREEN, MF_UNCHECKED);
-            ShowCursor(TRUE);
-            m_isFullscreen = FALSE;
-        }
-        else {
-            m_wpPrev.length = sizeof(WINDOWPLACEMENT);
-            GetWindowPlacement(m_hwnd, &m_wpPrev);
-            DWORD dwNewStyle = dwStyle & ~WS_OVERLAPPEDWINDOW;
-            SetWindowLong(m_hwnd, GWL_STYLE, dwNewStyle);
-            CheckMenuItem(m_hMenu, IDM_FILE_FULLSCREEN, MF_CHECKED);
-            SetMenu(m_hwnd, NULL);
-            HMONITOR hMonitor = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTOPRIMARY);
-            MONITORINFO mi = { sizeof(MONITORINFO) };
-            GetMonitorInfo(hMonitor, &mi);
-            SetWindowPos(m_hwnd, HWND_TOP,
-                mi.rcMonitor.left, mi.rcMonitor.top,
-                mi.rcMonitor.right - mi.rcMonitor.left,
-                mi.rcMonitor.bottom - mi.rcMonitor.top,
-                SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-            ShowCursor(FALSE);
-            m_isFullscreen = TRUE;
+            SetMenu(m_hwnd, m_hMenu); CheckMenuItem(m_hMenu, IDM_FILE_FULLSCREEN, MF_UNCHECKED); ShowCursor(TRUE); m_isFullscreen = FALSE;
+        } else {
+            m_wpPrev.length = sizeof(WINDOWPLACEMENT); GetWindowPlacement(m_hwnd, &m_wpPrev);
+            SetWindowLong(m_hwnd, GWL_STYLE, dwStyle & ~WS_OVERLAPPEDWINDOW); CheckMenuItem(m_hMenu, IDM_FILE_FULLSCREEN, MF_CHECKED);
+            SetMenu(m_hwnd, NULL); HMONITOR hMonitor = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTOPRIMARY); MONITORINFO mi = { sizeof(MONITORINFO) }; GetMonitorInfo(hMonitor, &mi);
+            SetWindowPos(m_hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            ShowCursor(FALSE); m_isFullscreen = TRUE;
         }
     }
     void RunMessageLoop() {
-        timeBeginPeriod(1);
-        MSG msg;
-        LARGE_INTEGER frequency;
-        QueryPerformanceFrequency(&frequency);
-        LARGE_INTEGER lastTime;
-        QueryPerformanceCounter(&lastTime);
-        const double TARGET_FPS = 59.7275;
-        const double SECONDS_PER_FRAME = 1.0 / TARGET_FPS;
+        timeBeginPeriod(1); MSG msg; LARGE_INTEGER frequency, lastTime, currentTime; QueryPerformanceFrequency(&frequency); QueryPerformanceCounter(&lastTime);
+        const double TARGET_FPS = 59.7275, SECONDS_PER_FRAME = 1.0 / TARGET_FPS;
         while (true) {
-            if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
-                if (msg.message == WM_QUIT) break;
-                TranslateMessage(&msg); DispatchMessage(&msg);
-            }
+            if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) { if (msg.message == WM_QUIT) break; TranslateMessage(&msg); DispatchMessage(&msg); }
             else {
-                LARGE_INTEGER currentTime;
-                QueryPerformanceCounter(&currentTime);
-                double elapsed = static_cast<double>(currentTime.QuadPart - lastTime.QuadPart) / frequency.QuadPart;
-                if (elapsed > 0.5) {
-                    lastTime = currentTime;
-                    elapsed = 0;
-                }
+                QueryPerformanceCounter(&currentTime); double elapsed = static_cast<double>(currentTime.QuadPart - lastTime.QuadPart) / frequency.QuadPart;
+                if (elapsed > 0.5) { lastTime = currentTime; elapsed = 0; }
                 if (elapsed >= SECONDS_PER_FRAME) {
-                    int framesToCatchUp = (int)(elapsed / SECONDS_PER_FRAME);
-                    if (framesToCatchUp > 3) framesToCatchUp = 3;
+                    int framesToCatchUp = (int)(elapsed / SECONDS_PER_FRAME); if (framesToCatchUp > 3) framesToCatchUp = 3;
                     lastTime.QuadPart += (LONGLONG)(framesToCatchUp * SECONDS_PER_FRAME * frequency.QuadPart);
-                    for (int i = 0; i < framesToCatchUp; i++) {
-                        m_gbCore.StepFrame();
-                        m_audio.PushSamples(m_gbCore.GetAudioSamples());
-                        if (i == framesToCatchUp - 1) {
-                            OnRender();
-                        }
-                    }
-                }
-                else {
-                    if (SECONDS_PER_FRAME - elapsed > 0.002) {
-                        Sleep(1);
-                    }
-                }
+                    for (int i = 0; i < framesToCatchUp; i++) { m_gbCore.StepFrame(); m_audio.PushSamples(m_gbCore.GetAudioSamples()); if (i == framesToCatchUp - 1) OnRender(); }
+                } else if (SECONDS_PER_FRAME - elapsed > 0.002) Sleep(1);
             }
-        }
-        timeEndPeriod(1);
+        } timeEndPeriod(1);
     }
-    void PauseAudio() { m_audio.Pause(); }
-    void ResumeAudio() { m_audio.Resume(); }
+    void PauseAudio() { m_audio.Pause(); } void ResumeAudio() { m_audio.Resume(); }
 private:
     void OnFileOpen() {
-        OPENFILENAME ofn; wchar_t szFile[260] = { 0 };
-        ZeroMemory(&ofn, sizeof(ofn));
+        OPENFILENAME ofn; wchar_t szFile[260] = { 0 }; ZeroMemory(&ofn, sizeof(ofn));
         ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = m_hwnd; ofn.lpstrFile = szFile; ofn.nMaxFile = sizeof(szFile);
-        ofn.lpstrFilter = L"GameBoy ROMs\0*.gb;*.gbc\0All Files\0*.*\0"; ofn.nFilterIndex = 1;
-        ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
-        PauseAudio();
-        if (GetOpenFileName(&ofn) == TRUE) {
-            m_gbCore.SaveRAM();
-            if (m_gbCore.LoadRom(szFile)) {
-                std::string titleStr = m_gbCore.GetTitle();
-                std::wstring wTitle(titleStr.begin(), titleStr.end());
-                std::wstring winTitle = L"GameBoy Emulator - " + wTitle;
-                SetWindowText(m_hwnd, winTitle.c_str());
-            }
-            else {
-                MessageBox(m_hwnd, L"Failed to load ROM file.", L"Error", MB_OK | MB_ICONERROR);
-            }
-        }
-        ResumeAudio();
+        ofn.lpstrFilter = L"GameBoy ROMs\0*.gb;*.gbc\0All Files\0*.*\0"; ofn.nFilterIndex = 1; ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+        PauseAudio(); if (GetOpenFileName(&ofn) == TRUE) { m_gbCore.SaveRAM(); if (m_gbCore.LoadRom(szFile)) { std::string titleStr = m_gbCore.GetTitle(); std::wstring wTitle(titleStr.begin(), titleStr.end()); SetWindowText(m_hwnd, (L"GameBoy Emulator - " + wTitle).c_str()); } else MessageBox(m_hwnd, L"Failed to load ROM file.", L"Error", MB_OK | MB_ICONERROR); } ResumeAudio();
     }
     HRESULT CreateDeviceResources() {
         if (!m_pRenderTarget) {
-            RECT rc; GetClientRect(m_hwnd, &rc);
-            D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top);
+            RECT rc; GetClientRect(m_hwnd, &rc); D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top);
             m_pDirect2dFactory->CreateHwndRenderTarget(D2D1::RenderTargetProperties(), D2D1::HwndRenderTargetProperties(m_hwnd, size), &m_pRenderTarget);
-            if (m_pRenderTarget) {
-                D2D1_BITMAP_PROPERTIES props;
-                props.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE);
-                props.dpiX = 96.0f; props.dpiY = 96.0f;
-                m_pRenderTarget->CreateBitmap(D2D1::SizeU(GB_WIDTH, GB_HEIGHT), props, &m_pBitmap);
-            }
-        }
-        return S_OK;
+            if (m_pRenderTarget) { D2D1_BITMAP_PROPERTIES props; props.pixelFormat = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE); props.dpiX = 96.0f; props.dpiY = 96.0f; m_pRenderTarget->CreateBitmap(D2D1::SizeU(GB_WIDTH, GB_HEIGHT), props, &m_pBitmap); }
+        } return S_OK;
     }
     void OnRender() {
         CreateDeviceResources();
         if (m_pRenderTarget && !(m_pRenderTarget->CheckWindowState() & D2D1_WINDOW_STATE_OCCLUDED)) {
-            m_pRenderTarget->BeginDraw();
-            m_pRenderTarget->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+            m_pRenderTarget->BeginDraw(); m_pRenderTarget->Clear(D2D1::ColorF(D2D1::ColorF::Black));
             if (m_pBitmap) {
-                m_pBitmap->CopyFromMemory(NULL, m_gbCore.GetPixelData(), GB_WIDTH * sizeof(uint32_t));
-                D2D1_SIZE_F rtSize = m_pRenderTarget->GetSize();
-                float scaleX = rtSize.width / (float)GB_WIDTH;
-                float scaleY = rtSize.height / (float)GB_HEIGHT;
-                float scale = (std::min)(scaleX, scaleY);
-                float drawW = GB_WIDTH * scale;
-                float drawH = GB_HEIGHT * scale;
-                float offsetX = (rtSize.width - drawW) / 2.0f;
-                float offsetY = (rtSize.height - drawH) / 2.0f;
-                m_pRenderTarget->DrawBitmap(m_pBitmap,
-                    D2D1::RectF(offsetX, offsetY, offsetX + drawW, offsetY + drawH),
-                    1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL);
+                m_pBitmap->CopyFromMemory(NULL, m_gbCore.GetPixelData(), GB_WIDTH * sizeof(uint32_t)); D2D1_SIZE_F rtSize = m_pRenderTarget->GetSize();
+                float scale = (std::min)(rtSize.width / (float)GB_WIDTH, rtSize.height / (float)GB_HEIGHT);
+                float drawW = GB_WIDTH * scale, drawH = GB_HEIGHT * scale, offsetX = (rtSize.width - drawW) / 2.0f, offsetY = (rtSize.height - drawH) / 2.0f;
+                m_pRenderTarget->DrawBitmap(m_pBitmap, D2D1::RectF(offsetX, offsetY, offsetX + drawW, offsetY + drawH), 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL);
             }
             if (m_pRenderTarget->EndDraw() == D2DERR_RECREATE_TARGET) { SafeRelease(&m_pBitmap); SafeRelease(&m_pRenderTarget); }
         }
@@ -1060,77 +570,25 @@ private:
         App* pApp = reinterpret_cast<App*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
         switch (message) {
         case WM_CREATE: { LPCREATESTRUCT pCreate = reinterpret_cast<LPCREATESTRUCT>(lParam); pApp = reinterpret_cast<App*>(pCreate->lpCreateParams); SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)pApp); return 0; }
-        case WM_COMMAND:
-            if (LOWORD(wParam) == IDM_FILE_OPEN && pApp) pApp->OnFileOpen();
-            if (LOWORD(wParam) == IDM_FILE_EXIT) DestroyWindow(hwnd);
-            if (LOWORD(wParam) == IDM_FILE_FULLSCREEN && pApp) pApp->ToggleFullscreen();
-            return 0;
-        case WM_NCHITTEST: {
-            LRESULT hit = DefWindowProc(hwnd, message, wParam, lParam);
-            if (hit == HTCLIENT && pApp && !pApp->m_isFullscreen) {
-                return HTCAPTION;
-            }
-            return hit;
-        }
+        case WM_COMMAND: if (LOWORD(wParam) == IDM_FILE_OPEN && pApp) pApp->OnFileOpen(); if (LOWORD(wParam) == IDM_FILE_EXIT) DestroyWindow(hwnd); if (LOWORD(wParam) == IDM_FILE_FULLSCREEN && pApp) pApp->ToggleFullscreen(); return 0;
+        case WM_NCHITTEST: { LRESULT hit = DefWindowProc(hwnd, message, wParam, lParam); if (hit == HTCLIENT && pApp && !pApp->m_isFullscreen) return HTCAPTION; return hit; }
         case WM_SIZE: if (pApp && pApp->m_pRenderTarget) pApp->m_pRenderTarget->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam))); return 0;
-        case WM_KEYDOWN: case WM_KEYUP:
-            if (pApp) {
-                bool pressed = (message == WM_KEYDOWN);
-                int key = -1;
-                if (pressed && wParam == VK_F11) {
-                    pApp->ToggleFullscreen();
-                    return 0;
-                }
-                if (pressed && wParam == VK_ESCAPE) {
-                    if (pApp->m_isFullscreen) {
-                        pApp->ToggleFullscreen();
-                    }
-                    return 0;
-                }
-                switch (wParam) {
-                case VK_RIGHT: key = 0; break; case VK_LEFT:  key = 1; break; case VK_UP:    key = 2; break; case VK_DOWN:  key = 3; break;
-                case 'Z':      key = 4; break; case 'X':      key = 5; break; case VK_SHIFT: key = 6; break; case VK_RETURN:key = 7; break;
-                }
-                if (key != -1) pApp->m_gbCore.InputKey(key, pressed);
-            }
-            return 0;
-        case WM_DROPFILES:
-            if (pApp) pApp->OnDropFiles((HDROP)wParam);
-            return 0;
-        case WM_ENTERMENULOOP:
-        case WM_ENTERSIZEMOVE:
-            if (pApp) pApp->PauseAudio();
-            return 0;
-        case WM_EXITMENULOOP:
-        case WM_EXITSIZEMOVE:
-            if (pApp) pApp->ResumeAudio();
-            return 0;
-        case WM_CLOSE:
-            if (pApp) pApp->m_gbCore.SaveRAM();
-            DestroyWindow(hwnd);
-            return 0;
-        case WM_DESTROY:
-            if (pApp) pApp->m_gbCore.SaveRAM();
-            PostQuitMessage(0);
-            return 0;
-        }
-        return DefWindowProc(hwnd, message, wParam, lParam);
+        case WM_KEYDOWN: case WM_KEYUP: if (pApp) { bool pressed = (message == WM_KEYDOWN); int key = -1; if (pressed && wParam == VK_F11) { pApp->ToggleFullscreen(); return 0; } if (pressed && wParam == VK_ESCAPE && pApp->m_isFullscreen) { pApp->ToggleFullscreen(); return 0; }
+            switch (wParam) { case VK_RIGHT: key = 0; break; case VK_LEFT: key = 1; break; case VK_UP: key = 2; break; case VK_DOWN: key = 3; break; case 'Z': key = 4; break; case 'X': key = 5; break; case VK_SHIFT: key = 6; break; case VK_RETURN:key = 7; break; } if (key != -1) pApp->m_gbCore.InputKey(key, pressed); } return 0;
+        case WM_DROPFILES: if (pApp) pApp->OnDropFiles((HDROP)wParam); return 0;
+        case WM_ENTERMENULOOP: case WM_ENTERSIZEMOVE: if (pApp) pApp->PauseAudio(); return 0;
+        case WM_EXITMENULOOP: case WM_EXITSIZEMOVE: if (pApp) pApp->ResumeAudio(); return 0;
+        case WM_CLOSE: if (pApp) pApp->m_gbCore.SaveRAM(); DestroyWindow(hwnd); return 0;
+        case WM_DESTROY: if (pApp) pApp->m_gbCore.SaveRAM(); PostQuitMessage(0); return 0;
+        } return DefWindowProc(hwnd, message, wParam, lParam);
     }
 };
 int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int nShowCmd) {
-    (void)CoInitialize(NULL);
-    App app;
+    (void)CoInitialize(NULL); App app;
     if (SUCCEEDED(app.Initialize(hInstance, nShowCmd))) {
-        int argc;
-        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-        if (argv) {
-            if (argc > 1) {
-                app.OpenRomFile(argv[1]);
-            }
-            LocalFree(argv);
-        }
+        int argc; LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv) { if (argc > 1) app.OpenRomFile(argv[1]); LocalFree(argv); }
         app.RunMessageLoop();
     }
-    CoUninitialize();
-    return 0;
+    CoUninitialize(); return 0;
 }
